@@ -1,0 +1,49 @@
+name: RehaFlow Windows Desktop
+on: [push, workflow_dispatch]
+permissions:
+  contents: write
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Node 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Build React
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+      - name: Bundle frontend
+        shell: pwsh
+        run: |
+          if(Test-Path desktop/wwwroot){Remove-Item desktop/wwwroot -Recurse -Force}
+          New-Item -ItemType Directory -Force desktop/wwwroot | Out-Null
+          Copy-Item dist\* desktop/wwwroot -Recurse -Force
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+      - name: Restore
+        run: dotnet restore desktop/RehaFlow.Desktop.csproj -r win-x64
+      - name: Publish
+        run: dotnet publish desktop/RehaFlow.Desktop.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=false -o desktop/release
+      - name: Verify
+        shell: pwsh
+        run: |
+          $exe='desktop/release/RehaFlow.CommandCenter.exe'
+          if(!(Test-Path $exe)){throw 'EXE not produced'}
+          $size=(Get-Item $exe).Length
+          Write-Host "EXE $size bytes"
+          if($size -lt 5000000){throw 'EXE unexpectedly small'}
+      - name: Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag='v0.1.0'
+          gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
+          if($LASTEXITCODE -ne 0){gh release create $tag desktop/release/RehaFlow.CommandCenter.exe --repo $env:GITHUB_REPOSITORY --title 'RehaFlow Command Center v0.1.0' --notes 'First Windows Command Center test build using Netlify API.'}
+          else {gh release upload $tag desktop/release/RehaFlow.CommandCenter.exe --repo $env:GITHUB_REPOSITORY --clobber}
