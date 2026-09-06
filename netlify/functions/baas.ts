@@ -1,5 +1,5 @@
 import type { Config, Handler } from '@netlify/functions';
-import { handler as apiHandler } from './api3';
+import { handler as apiHandler } from './api4';
 
 export const config: Config = { path: ['/api/baas', '/api/baas/*'] };
 
