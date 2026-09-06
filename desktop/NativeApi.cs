@@ -9,12 +9,13 @@ namespace RehaFlow.CommandCenter;
 
 public sealed class NativeApi
 {
-    private const string BaseUrl = "https://gregarious-frangollo-24145c.netlify.app/.netlify/functions/api";
+    private const string BaseUrl = "https://gregarious-frangollo-24145c.netlify.app/api/baas";
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(30) };
 
     public async Task<JsonNode?> SendAsync(string method, string path, string? body, string? token, CancellationToken cancellationToken = default)
     {
-        using var request = new HttpRequestMessage(new HttpMethod(method), BaseUrl + path);
+        if (!path.StartsWith('/')) path = "/" + path;
+        using var request = new HttpRequestMessage(new HttpMethod(method), BaseUrl.TrimEnd('/') + path);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         request.Headers.TryAddWithoutValidation("X-Client", "rehaflow-windows-native");
         request.Headers.TryAddWithoutValidation("X-Device-Id", "windows-desktop");
@@ -33,13 +34,14 @@ public sealed class NativeApi
         catch (JsonException) { }
 
         if (!response.IsSuccessStatusCode)
-        {
-            var message = ExtractMessage(data, raw, (int)response.StatusCode);
-            throw new InvalidOperationException(message);
-        }
+            throw new InvalidOperationException(ExtractMessage(data, raw, (int)response.StatusCode));
 
         if (data is null && !string.IsNullOrWhiteSpace(raw))
-            throw new InvalidOperationException($"API returned non-JSON response (HTTP {(int)response.StatusCode}).");
+        {
+            if (raw.Contains("<title>Page not found</title>", StringComparison.OrdinalIgnoreCase) || raw.Contains("<!DOCTYPE html", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("API endpoint не знайдено (404). Перевірено /api/baas.");
+            throw new InvalidOperationException($"API повернув не-JSON відповідь (HTTP {(int)response.StatusCode}).");
+        }
 
         return data;
     }
@@ -53,7 +55,10 @@ public sealed class NativeApi
             if (obj["error"] is JsonValue value) return value.ToString();
             if (obj["message"] is JsonValue msg) return msg.ToString();
         }
+
         var text = (raw ?? string.Empty).Trim();
+        if (text.Contains("<title>Page not found</title>", StringComparison.OrdinalIgnoreCase) || text.Contains("<!DOCTYPE html", StringComparison.OrdinalIgnoreCase))
+            return $"API endpoint не знайдено (HTTP {status}).";
         if (text.Length > 800) text = text[..800];
         return string.IsNullOrWhiteSpace(text) ? $"HTTP {status}" : text;
     }
