@@ -29,15 +29,9 @@ class Turso {
 let dbi:Turso|null=null; const db=()=>dbi||(dbi=new Turso());
 let ready:Promise<void>|null=null;
 
-const roleSeeds:[string,string][]=[['admin','Адміністратор'],['manager','Керівник'],['doctor','Лікар'],['nurse','Медсестра'],['registrar','Реєстратура']];
+const roleSeeds:[string,string][]=[['admin','Адміністратор'],['manager','Керівник'],['doctor','Лікар'],['nurse','Медсестра'],['registrar','Реєстрація']];
 const permissionSeeds=['dashboard','patients','archive','reception','beds','tasks','orders','documents','staff','analytics','admin','*'];
-const matrix:Record<string,string[]>= {
-  admin:['*'],
-  manager:['dashboard','patients','archive','reception','beds','tasks','orders','documents','staff','analytics'],
-  doctor:['dashboard','patients','archive','reception','beds','tasks','orders','documents'],
-  nurse:['dashboard','patients','archive','beds','tasks','orders','documents'],
-  registrar:['dashboard','patients','archive','reception']
-};
+const matrix:Record<string,string[]>={admin:['*'],manager:['dashboard','patients','archive','reception','beds','tasks','orders','documents','staff','analytics'],doctor:['dashboard','patients','archive','reception','beds','tasks','orders','documents'],nurse:['dashboard','patients','archive','beds','tasks','orders','documents'],registrar:['dashboard','patients','archive','reception']};
 
 export async function ensureRbac(){
   if(ready) return ready;
@@ -53,23 +47,7 @@ export async function ensureRbac(){
 }
 
 export async function roles(){await ensureRbac();const rows=(await db().run(`SELECT r.key,r.name,r.active,COALESCE((SELECT json_group_array(p.key) FROM rf_role_permissions rp JOIN rf_permissions p ON p.id=rp.permission_id WHERE rp.role_id=r.id),'[]') permissions FROM rf_roles r WHERE r.active=1 ORDER BY r.key`)).rows;return rows.map((r:any)=>({...r,active:Number(r.active),permissions:typeof r.permissions==='string'?JSON.parse(r.permissions):r.permissions}));}
-
 export async function current(accessToken:string){if(!accessToken)return null;await ensureRbac();const r=await db().run(`SELECT u.id,u.email,u.name,u.role,u.active,s.id session_id,s.expires_at FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.access_token=? LIMIT 1`,[sha(accessToken)]);const u:any=r.rows[0];if(!u||Number(u.active)!==1||new Date(u.expires_at).getTime()<Date.now())return null;const ps=(await db().run(`SELECT p.key FROM rf_role_permissions rp JOIN rf_permissions p ON p.id=rp.permission_id JOIN rf_roles r ON r.id=rp.role_id WHERE r.key=? AND r.active=1 AND p.active=1`,[u.role])).rows;u.permissions=ps.map((x:any)=>x.key);return u;}
-
 export const allowed=(user:any,permission:string)=>Array.isArray(user?.permissions)&&(user.permissions.includes('*')||user.permissions.includes(permission));
-
-export function permissionForPath(path:string,method:string){
-  if(method==='OPTIONS'||path==='/auth/login'||path==='/auth/logout'||path==='/auth/me'||path==='/session'||path==='/me'||path==='/roles') return null;
-  if(path.startsWith('/dashboard')) return 'dashboard';
-  if(path.startsWith('/patients')) return 'patients';
-  if(path.startsWith('/archive')||path.startsWith('/patient-history')) return 'archive';
-  if(path.startsWith('/rooms')||path.startsWith('/beds')) return 'beds';
-  if(path.startsWith('/tasks')) return 'tasks';
-  if(path.startsWith('/prescriptions')) return 'orders';
-  if(path.startsWith('/documents')) return 'documents';
-  if(path.startsWith('/users')||path.startsWith('/staff')||path.startsWith('/sessions')) return 'staff';
-  if(path.startsWith('/audit')) return 'admin';
-  return null;
-}
-
+export function permissionForPath(path:string,method:string){if(method==='OPTIONS'||path==='/auth/login'||path==='/auth/logout'||path==='/auth/me'||path==='/session'||path==='/me'||path==='/roles')return null;if(path.startsWith('/dashboard'))return'dashboard';if(path.startsWith('/patients'))return'patients';if(path.startsWith('/archive')||path.startsWith('/patient-history'))return'archive';if(path.startsWith('/rooms')||path.startsWith('/beds'))return'beds';if(path.startsWith('/tasks'))return'tasks';if(path.startsWith('/prescriptions'))return'orders';if(path.startsWith('/documents'))return'documents';if(path.startsWith('/users')||path.startsWith('/staff')||path.startsWith('/sessions'))return'staff';if(path.startsWith('/audit'))return'admin';return null;}
 export async function listRoles(){return roles();}
