@@ -13,6 +13,7 @@ public sealed class NativeApi
     private static readonly string[] ApiBases =
     {
         SiteBase + "/api/baas",
+        SiteBase + "/.netlify/functions/baas",
         SiteBase + "/.netlify/functions/api",
         SiteBase + "/api"
     };
@@ -28,8 +29,7 @@ public sealed class NativeApi
         {
             try
             {
-                var result = await SendOnceAsync(method, baseUrl.TrimEnd('/') + path, body, token, cancellationToken);
-                return result;
+                return await SendOnceAsync(method, baseUrl.TrimEnd('/') + path, body, token, cancellationToken);
             }
             catch (ApiRouteNotFoundException ex)
             {
@@ -75,7 +75,11 @@ public sealed class NativeApi
     private static bool IsNotFoundPayload(JsonNode? data, string raw)
     {
         if (data is JsonObject obj && obj["error"] is JsonValue e)
-            return string.Equals(e.ToString(), "API endpoint not found", StringComparison.OrdinalIgnoreCase);
+        {
+            var message = e.ToString();
+            if (message.Contains("endpoint not found", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
         return raw.Contains("<title>Page not found</title>", StringComparison.OrdinalIgnoreCase)
             || raw.Contains("<!DOCTYPE html", StringComparison.OrdinalIgnoreCase);
     }
