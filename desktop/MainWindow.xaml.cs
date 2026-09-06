@@ -3,6 +3,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Windows;
 using Microsoft.Web.WebView2.Wpf;
 using Microsoft.Web.WebView2.Core;
@@ -80,7 +81,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private async System.Threading.Tasks.Task ResolveNativeAsync(string id, bool ok, object? data)
+    private async System.Threading.Tasks.Task ResolveNativeAsync(string id, bool ok, JsonNode? data)
     {
         var idJson = JsonSerializer.Serialize(id);
         var dataJson = ok ? (data?.ToJsonString() ?? "null") : JsonSerializer.Serialize(data?.ToString() ?? "Native API error");
