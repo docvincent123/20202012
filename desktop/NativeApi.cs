@@ -9,13 +9,40 @@ namespace RehaFlow.CommandCenter;
 
 public sealed class NativeApi
 {
-    private const string BaseUrl = "https://gregarious-frangollo-24145c.netlify.app/api/baas";
+    private const string SiteBase = "https://gregarious-frangollo-24145c.netlify.app";
+    private static readonly string[] ApiBases =
+    {
+        SiteBase + "/api/baas",
+        SiteBase + "/.netlify/functions/api",
+        SiteBase + "/api"
+    };
+
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(30) };
 
     public async Task<JsonNode?> SendAsync(string method, string path, string? body, string? token, CancellationToken cancellationToken = default)
     {
         if (!path.StartsWith('/')) path = "/" + path;
-        using var request = new HttpRequestMessage(new HttpMethod(method), BaseUrl.TrimEnd('/') + path);
+
+        Exception? lastError = null;
+        foreach (var baseUrl in ApiBases)
+        {
+            try
+            {
+                var result = await SendOnceAsync(method, baseUrl.TrimEnd('/') + path, body, token, cancellationToken);
+                return result;
+            }
+            catch (ApiRouteNotFoundException ex)
+            {
+                lastError = ex;
+            }
+        }
+
+        throw lastError ?? new InvalidOperationException("API endpoint не знайдено.");
+    }
+
+    private async Task<JsonNode?> SendOnceAsync(string method, string url, string? body, string? token, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(new HttpMethod(method), url);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         request.Headers.TryAddWithoutValidation("X-Client", "rehaflow-windows-native");
         request.Headers.TryAddWithoutValidation("X-Device-Id", "windows-desktop");
@@ -33,18 +60,27 @@ public sealed class NativeApi
         try { data = string.IsNullOrWhiteSpace(raw) ? null : JsonNode.Parse(raw); }
         catch (JsonException) { }
 
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound || IsNotFoundPayload(data, raw))
+            throw new ApiRouteNotFoundException();
+
         if (!response.IsSuccessStatusCode)
             throw new InvalidOperationException(ExtractMessage(data, raw, (int)response.StatusCode));
 
         if (data is null && !string.IsNullOrWhiteSpace(raw))
-        {
-            if (raw.Contains("<title>Page not found</title>", StringComparison.OrdinalIgnoreCase) || raw.Contains("<!DOCTYPE html", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("API endpoint не знайдено (404). Перевірено /api/baas.");
             throw new InvalidOperationException($"API повернув не-JSON відповідь (HTTP {(int)response.StatusCode}).");
-        }
 
         return data;
     }
+
+    private static bool IsNotFoundPayload(JsonNode? data, string raw)
+    {
+        if (data is JsonObject obj && obj["error"] is JsonValue e)
+            return string.Equals(e.ToString(), "API endpoint not found", StringComparison.OrdinalIgnoreCase);
+        return raw.Contains("<title>Page not found</title>", StringComparison.OrdinalIgnoreCase)
+            || raw.Contains("<!DOCTYPE html", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private sealed class ApiRouteNotFoundException : Exception { }
 
     private static string ExtractMessage(JsonNode? data, string raw, int status)
     {
