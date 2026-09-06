@@ -1,7 +1,6 @@
 <Window x:Class="RehaFlow.CommandCenter.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:wpf="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2"
         Title="RehaFlow Command Center"
         Width="1440"
         Height="900"
@@ -11,7 +10,5 @@
         Background="#061412"
         WindowStyle="None"
         AllowsTransparency="False">
-    <Grid>
-        <wpf:WebView2 x:Name="Browser" />
-    </Grid>
+    <Grid x:Name="Host" />
 </Window>
