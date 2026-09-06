@@ -64,7 +64,12 @@ public partial class MainWindow : Window
         string id = string.Empty;
         try
         {
-            using var doc = JsonDocument.Parse(e.WebMessageAsJson);
+            // chrome.webview.postMessage(string) is surfaced by WebView2 as a string payload.
+            // Parse the actual message string rather than e.WebMessageAsJson directly.
+            var message = e.TryGetWebMessageAsString();
+            if (string.IsNullOrWhiteSpace(message)) return;
+
+            using var doc = JsonDocument.Parse(message);
             var root = doc.RootElement;
             if (!root.TryGetProperty("type", out var type) || type.GetString() != "api") return;
             id = root.GetProperty("id").GetString() ?? string.Empty;
@@ -77,7 +82,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            if (!string.IsNullOrWhiteSpace(id)) await ResolveNativeAsync(id, false, ex.Message);
+            if (!string.IsNullOrWhiteSpace(id)) await ResolveNativeAsync(id, false, JsonValue.Create(ex.Message));
         }
     }
 
