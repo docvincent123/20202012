@@ -1,13 +1,14 @@
 {
   "name": "rehaflow-command-center",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {"dev":"vite","build":"vite build"},
   "dependencies": {
     "@netlify/functions":"^3.1.10",
     "bcryptjs":"^3.0.2",
     "@vitejs/plugin-react":"latest",
+    "qrcode":"^1.5.4",
     "vite":"latest",
     "typescript":"latest",
     "react":"latest",
