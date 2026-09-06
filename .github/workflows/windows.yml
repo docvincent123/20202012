@@ -7,28 +7,47 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
+
       - name: Node 22
         uses: actions/setup-node@v5
         with:
           node-version: '22'
+
       - name: Build React
+        shell: pwsh
         run: |
           npm install --no-audit --no-fund
           npm run build
+
       - name: Bundle frontend
         shell: pwsh
         run: |
           if(Test-Path desktop/wwwroot){Remove-Item desktop/wwwroot -Recurse -Force}
           New-Item -ItemType Directory -Force desktop/wwwroot | Out-Null
           Copy-Item dist\* desktop/wwwroot -Recurse -Force
+
       - name: Setup .NET 8
         uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '8.0.x'
+
+      - name: Show .NET SDK
+        shell: pwsh
+        run: dotnet --info
+
       - name: Restore
-        run: dotnet restore desktop/RehaFlow.Desktop.csproj -r win-x64
+        shell: pwsh
+        run: dotnet restore desktop/RehaFlow.Desktop.csproj -r win-x64 --nologo
+
+      - name: Build
+        shell: pwsh
+        run: dotnet build desktop/RehaFlow.Desktop.csproj -c Release -r win-x64 --no-restore --nologo
+
       - name: Publish
-        run: dotnet publish desktop/RehaFlow.Desktop.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=false -o desktop/release
+        shell: pwsh
+        run: |
+          dotnet publish desktop/RehaFlow.Desktop.csproj -c Release -r win-x64 --self-contained true --no-restore -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=false -p:DebugType=None -o desktop/release --nologo
+
       - name: Verify
         shell: pwsh
         run: |
@@ -37,6 +56,7 @@ jobs:
           $size=(Get-Item $exe).Length
           Write-Host "EXE $size bytes"
           if($size -lt 5000000){throw 'EXE unexpectedly small'}
+
       - name: Release
         shell: pwsh
         env:
@@ -44,5 +64,8 @@ jobs:
         run: |
           $tag='v0.1.0'
           gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
-          if($LASTEXITCODE -ne 0){gh release create $tag desktop/release/RehaFlow.CommandCenter.exe --repo $env:GITHUB_REPOSITORY --title 'RehaFlow Command Center v0.1.0' --notes 'First Windows Command Center test build using Netlify API.'}
-          else {gh release upload $tag desktop/release/RehaFlow.CommandCenter.exe --repo $env:GITHUB_REPOSITORY --clobber}
+          if($LASTEXITCODE -ne 0){
+            gh release create $tag desktop/release/RehaFlow.CommandCenter.exe --repo $env:GITHUB_REPOSITORY --title 'RehaFlow Command Center v0.1.0' --notes 'First Windows Command Center test build using Netlify API.'
+          } else {
+            gh release upload $tag desktop/release/RehaFlow.CommandCenter.exe --repo $env:GITHUB_REPOSITORY --clobber
+          }
