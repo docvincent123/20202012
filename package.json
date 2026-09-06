@@ -4,6 +4,15 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {"dev":"vite","build":"vite build"},
-  "dependencies": {"@vitejs/plugin-react":"latest","vite":"latest","typescript":"latest","react":"latest","react-dom":"latest","lucide-react":"latest"},
+  "dependencies": {
+    "@netlify/functions":"^3.1.10",
+    "bcryptjs":"^3.0.2",
+    "@vitejs/plugin-react":"latest",
+    "vite":"latest",
+    "typescript":"latest",
+    "react":"latest",
+    "react-dom":"latest",
+    "lucide-react":"latest"
+  },
   "devDependencies": {}
 }
