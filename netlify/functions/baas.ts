@@ -25,6 +25,12 @@ export const handler: Handler = async (event, context) => {
       if(!user) return json({error:'Unauthorized'},401);
       if(!allowed(user,required)) return json({error:'Forbidden',permission:required},403);
     }
-    return apiHandler({ ...event, path: normalizedPath, rawUrl: event.rawUrl?.replace(/\\/api\\/baas(?=\\/|$)/, '') }, context);
+    let routePath=normalizedPath;
+    let routeMethod=method;
+    if(routePath.startsWith('/auth/')) routePath=routePath.slice(5);
+    if(routePath==='/staff/doctors') routePath='/doctors';
+    if(routePath.match(/^\/patients\/[^/]+\/archive$/)&&routeMethod==='POST'){routePath=routePath.replace(/\/archive$/,'');routeMethod='DELETE';}
+    if(routePath.match(/^\/beds\/[^/]+$/)&&routeMethod==='PATCH'){routePath += '/assign';routeMethod='POST';}
+    return apiHandler({ ...event, path: routePath, httpMethod: routeMethod as any, rawUrl: event.rawUrl?.replace(/\\/api\\/baas(?=\\/|$)/, '') }, context);
   } catch (e:any) { return json({error:e?.message||'Gateway error'},500); }
 };
