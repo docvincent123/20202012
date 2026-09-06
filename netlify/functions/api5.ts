@@ -62,10 +62,14 @@ async function init() {
       ['rf_patients','current_bed_id','TEXT'],['rf_patients','attending_doctor_id','TEXT'],['rf_patients','room_id','TEXT'],['rf_patients','bed_id','TEXT'],['rf_patients','admitted_at','TEXT'],['rf_patients','discharged_at','TEXT'],
       ['rf_beds','qr_payload','TEXT'],['rf_beds','patient_id','TEXT'],['rf_beds','updated_at','TEXT']
     ] as const) await column(t,c,ty);
-    const email = (process.env.DEFAULT_ADMIN_EMAIL || 'mishaborkovskijwork@gmail.com').trim();
-    const pw = process.env.DEFAULT_ADMIN_PASSWORD || '12345678';
-    const u = await db().run('SELECT id FROM users WHERE lower(email)=lower(?) LIMIT 1',[email]);
-    if (!u.rows.length) await db().run('INSERT INTO users(id,email,name,password_hash,role,active) VALUES(?,?,?,?,?,1)', ['admin-default',email,process.env.DEFAULT_ADMIN_NAME || 'System Administrator',await bcrypt.hash(pw,10),'admin']);
+
+    const bootstrapEmail = (process.env.DEFAULT_ADMIN_EMAIL || '').trim();
+    const bootstrapPassword = process.env.DEFAULT_ADMIN_PASSWORD || '';
+    if (bootstrapEmail && bootstrapPassword) {
+      const u = await db().run('SELECT id FROM users WHERE lower(email)=lower(?) LIMIT 1',[bootstrapEmail]);
+      if (!u.rows.length) await db().run('INSERT INTO users(id,email,name,password_hash,role,active) VALUES(?,?,?,?,?,1)', ['admin-bootstrap',bootstrapEmail,process.env.DEFAULT_ADMIN_NAME || 'System Administrator',await bcrypt.hash(bootstrapPassword,12),'admin']);
+    }
+
     const rooms = await db().run('SELECT COUNT(*) c FROM rf_rooms');
     if (!Number(rooms.rows[0]?.c || 0)) for (const n of ['101','102','103','104','105','106','107']) await db().run('INSERT INTO rf_rooms(id,name,department,active) VALUES(?,?,?,1)',[uid('room'),`Палата ${n}`,'Реабілітація']);
     const beds = await db().run('SELECT COUNT(*) c FROM rf_beds');
@@ -86,7 +90,8 @@ async function auth(p:string,e:HandlerEvent){
     const b=body(e), ident=String(b.email||b.login||b.username||b.identifier||'').trim(), pass=String(b.password||'');
     if(!ident||!pass) return json({error:'Email/login and password are required'},400);
     const r=await db().run('SELECT * FROM users WHERE lower(email)=lower(?) OR lower(name)=lower(?) LIMIT 1',[ident,ident]); const u:any=r.rows[0];
-    let ok=false; if(u){ const ph=String(u.password_hash||''); ok=ph.startsWith('$2')?await bcrypt.compare(pass,ph):ph===pass; }
+    let ok=false;
+    if(u){ const ph=String(u.password_hash||''); ok=ph.startsWith('$2') ? await bcrypt.compare(pass,ph) : false; }
     await db().run('INSERT INTO login_history(id,user_id,identifier,success,ip,user_agent) VALUES(?,?,?,?,?,?)',[uid('login'),u?.id||null,ident,ok?1:0,e.headers?.['x-forwarded-for']||null,e.headers?.['user-agent']||null]);
     if(!u||!ok||Number(u.active)!==1) return json({error:'Invalid credentials'},401);
     const at=secret(),rt=secret(),sid=uid('sess'),exp=new Date(Date.now()+12*60*60*1000).toISOString();
@@ -155,8 +160,8 @@ async function generic(p:string,e:HandlerEvent,u:any){
   if(p==='/prescriptions'&&e.httpMethod==='GET'){const rows=(await db().run('SELECT * FROM rf_prescriptions ORDER BY created_at DESC')).rows;return json({prescriptions:rows,items:rows});}if(p==='/prescriptions'&&e.httpMethod==='POST'){const b=body(e),id=uid('rx');await db().run('INSERT INTO rf_prescriptions(id,patient_id,doctor_id,drug,dose,route,frequency,start_at,end_at,status,note) VALUES(?,?,?,?,?,?,?,?,?,?,?)',[id,b.patientId||null,b.doctorId||u.id,b.drug,b.dose||null,b.route||null,b.frequency||null,b.startAt||null,b.endAt||null,b.status||'active',b.note||null]);return json({prescription:{id}},201);}
   if(p==='/documents'&&e.httpMethod==='GET'){const patientId=q(e,'patientId');const rows=(await db().run(`SELECT * FROM rf_documents WHERE (?='' OR patient_id=?) ORDER BY created_at DESC`,[patientId,patientId])).rows;return json({documents:rows,items:rows});}if(p==='/documents'&&e.httpMethod==='POST'){const b=body(e),id=uid('doc');await db().run('INSERT INTO rf_documents(id,patient_id,title,category,content,file_name,file_url,created_by) VALUES(?,?,?,?,?,?,?,?)',[id,b.patientId||null,b.title,b.category||'other',b.content||null,b.fileName||null,b.fileUrl||null,u.id]);return json({document:{id}},201);}
   if(p==='/users'&&e.httpMethod==='GET'){const term=q(e,'q');const rows=(await db().run("SELECT id,email,name,role,active,created_at FROM users WHERE (?='' OR lower(name) LIKE lower(?) OR lower(email) LIKE lower(?)) ORDER BY name",[term,`%${term}%`,`%${term}%`])).rows;return json({users:rows,items:rows});}
-  if(p==='/users'&&e.httpMethod==='POST'){if(!allowed(u,'staff'))throw error('Forbidden',403);const b=body(e),id=uid('usr');if(!b.email||!b.name||!b.password)return json({error:'name, email and password are required'},400);await db().run('INSERT INTO users(id,email,name,password_hash,role,active) VALUES(?,?,?,?,?,?)',[id,b.email,b.name,await bcrypt.hash(String(b.password),10),b.role||'doctor',b.active===false?0:1]);return json({user:{id}},201);}
-  const um=p.match(/^\/users\/([^/]+)$/);if(um&&e.httpMethod==='PATCH'){if(!allowed(u,'staff'))throw error('Forbidden',403);const b=body(e);if(b.name!==undefined)await db().run('UPDATE users SET name=?,updated_at=? WHERE id=?',[b.name,now(),um[1]]);if(b.role!==undefined)await db().run('UPDATE users SET role=?,updated_at=? WHERE id=?',[b.role,now(),um[1]]);if(b.active!==undefined)await db().run('UPDATE users SET active=?,updated_at=? WHERE id=?',[b.active?1:0,now(),um[1]]);if(b.password)await db().run('UPDATE users SET password_hash=?,updated_at=? WHERE id=?',[await bcrypt.hash(String(b.password),10),now(),um[1]]);return json({ok:true});}if(um&&e.httpMethod==='DELETE'){if(!allowed(u,'staff'))throw error('Forbidden',403);await db().run('UPDATE users SET active=0,updated_at=? WHERE id=?',[now(),um[1]]);return json({ok:true});}
+  if(p==='/users'&&e.httpMethod==='POST'){if(!allowed(u,'staff'))throw error('Forbidden',403);const b=body(e),id=uid('usr');if(!b.email||!b.name||!b.password)return json({error:'name, email and password are required'},400);await db().run('INSERT INTO users(id,email,name,password_hash,role,active) VALUES(?,?,?,?,?,?)',[id,b.email,b.name,await bcrypt.hash(String(b.password),12),b.role||'doctor',b.active===false?0:1]);return json({user:{id}},201);}
+  const um=p.match(/^\/users\/([^/]+)$/);if(um&&e.httpMethod==='PATCH'){if(!allowed(u,'staff'))throw error('Forbidden',403);const b=body(e);if(b.name!==undefined)await db().run('UPDATE users SET name=?,updated_at=? WHERE id=?',[b.name,now(),um[1]]);if(b.role!==undefined)await db().run('UPDATE users SET role=?,updated_at=? WHERE id=?',[b.role,now(),um[1]]);if(b.active!==undefined)await db().run('UPDATE users SET active=?,updated_at=? WHERE id=?',[b.active?1:0,now(),um[1]]);if(b.password)await db().run('UPDATE users SET password_hash=?,updated_at=? WHERE id=?',[await bcrypt.hash(String(b.password),12),now(),um[1]]);return json({ok:true});}if(um&&e.httpMethod==='DELETE'){if(!allowed(u,'staff'))throw error('Forbidden',403);await db().run('UPDATE users SET active=0,updated_at=? WHERE id=?',[now(),um[1]]);return json({ok:true});}
   if(p==='/roles'&&e.httpMethod==='GET')return json({roles:Object.entries(permissions).map(([role,items])=>({role,permissions:items}))});
   if(p==='/staff/doctors'&&e.httpMethod==='GET'){const rows=(await db().run("SELECT id,name,email,role FROM users WHERE active=1 AND role='doctor' ORDER BY name")).rows;return json({doctors:rows,items:rows});}
   if(p==='/sessions'&&e.httpMethod==='GET'){if(!allowed(u,'admin'))throw error('Forbidden',403);const rows=(await db().run(`SELECT s.id,s.user_id,u.name,u.email,u.role,s.expires_at,s.created_at,s.last_seen_at,s.device_id,s.device_name,s.platform,s.app_version,s.ip,s.user_agent FROM sessions s JOIN users u ON u.id=s.user_id ORDER BY s.last_seen_at DESC`)).rows;return json({sessions:rows,items:rows});}
