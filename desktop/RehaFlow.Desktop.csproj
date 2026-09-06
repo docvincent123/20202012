@@ -15,10 +15,6 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
-    <ApplicationDefinition Include="App.xaml" />
-    <Page Include="MainWindow.xaml" />
-    <Compile Include="App.xaml.cs" />
-    <Compile Include="MainWindow.xaml.cs" />
     <Content Include="wwwroot\**\*" CopyToOutputDirectory="PreserveNewest" Condition="Exists('wwwroot')" />
   </ItemGroup>
 </Project>
