@@ -1,7 +1,7 @@
 {
   "name": "rehaflow-command-center",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.20.0",
   "type": "module",
   "scripts": {"dev":"vite","build":"vite build"},
   "dependencies": {
