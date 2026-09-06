@@ -19,6 +19,5 @@
     <EmbeddedResource Include="wwwroot\**\*" Condition="Exists('wwwroot')">
       <LogicalName>rehaflow/%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
     </EmbeddedResource>
-    <Compile Include="NativeApi.cs" />
   </ItemGroup>
 </Project>
