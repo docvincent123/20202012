@@ -63,6 +63,9 @@ public sealed class NativeApi
         if (response.StatusCode == System.Net.HttpStatusCode.NotFound || IsNotFoundPayload(data, raw))
             throw new ApiRouteNotFoundException();
 
+        if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+            throw new InvalidOperationException("RF_AUTH_EXPIRED");
+
         if (!response.IsSuccessStatusCode)
             throw new InvalidOperationException(ExtractMessage(data, raw, (int)response.StatusCode));
 
