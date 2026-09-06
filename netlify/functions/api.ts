@@ -88,6 +88,22 @@ async function ensureSchema() {
     await c.execute(`CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT, name TEXT, password_hash TEXT, role TEXT DEFAULT 'doctor', active INTEGER DEFAULT 1, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
     await c.execute(`CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT, access_token TEXT, refresh_token TEXT, expires_at TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
     await c.execute(`CREATE TABLE IF NOT EXISTS login_history (id TEXT PRIMARY KEY, user_id TEXT, identifier TEXT, success INTEGER, ip TEXT, user_agent TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
+
+    // Bootstrap one administrator only when the database has no users yet.
+    const countResult = await c.execute(`SELECT COUNT(*) AS count FROM users`);
+    const userCount = Number(countResult.rows[0]?.count ?? 0);
+    if (userCount === 0) {
+      const defaultEmail = process.env.DEFAULT_ADMIN_EMAIL?.trim() || "mishaborkovskijwork@gmail.com";
+      const defaultPassword = process.env.DEFAULT_ADMIN_PASSWORD || "12345678";
+      const defaultName = process.env.DEFAULT_ADMIN_NAME?.trim() || "System Administrator";
+      const passwordHash = await bcrypt.hash(defaultPassword, 10);
+      await c.execute({
+        sql: `INSERT INTO users(id,email,name,password_hash,role,active) VALUES(?,?,?,?,?,1)`,
+        args: ["admin-default", defaultEmail, defaultName, passwordHash, "admin"],
+      });
+      console.log(`Bootstrapped initial administrator: ${defaultEmail}`);
+    }
+
     initialized = true;
   })().catch(err => { initPromise = null; throw err; });
   return initPromise;
@@ -129,7 +145,7 @@ async function auth(path: string, event: HandlerEvent) {
 
 export const handler: Handler = async (event) => {
   try {
-    let path = event.path.replace(/^\/.netlify\/functions\/api/, "").replace(/^\/api\/baas/, "").replace(/^\/api/, "") || "/";
+    const path = event.path.replace(/^\/.netlify\/functions\/api/, "").replace(/^\/api\/baas/, "").replace(/^\/api/, "") || "/";
     if (event.httpMethod === "OPTIONS") return json({ ok: true });
     if (path.startsWith("/auth/")) return await auth(path.slice(5), event);
     if (path === "/health" && event.httpMethod === "GET") return json({ ok: true, service: "rehaflow-api" });
