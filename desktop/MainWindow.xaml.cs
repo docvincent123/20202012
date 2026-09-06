@@ -32,34 +32,36 @@ public partial class MainWindow : Window
             _browser.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
             _browser.CoreWebView2.Settings.AreDevToolsEnabled = true;
             _browser.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
-            await _browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(@"
+
+            await _browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync("""
 (() => {
   const pending = new Map();
   window.__rfNativeResolve = (id, ok, data) => {
-    const item = pending.get(id); if (!item) return;
+    const item = pending.get(id);
+    if (!item) return;
     pending.delete(id);
     ok ? item.resolve(data) : item.reject(new Error(String(data || 'Native API error')));
   };
-  window.__rfNativeApi = request => new Promise((resolve,reject) => {
+  window.__rfNativeApi = request => new Promise((resolve, reject) => {
     const id = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
-    pending.set(id,{resolve,reject});
-    chrome.webview.postMessage(JSON.stringify({...request,id,type:'api'}));
+    pending.set(id, { resolve, reject });
+    chrome.webview.postMessage(JSON.stringify({ ...request, id, type: 'api' }));
   });
   const showFatal = msg => {
     try {
       const render = () => {
         let box = document.getElementById('rf-fatal');
-        if (!box) { box = document.createElement('div'); box.id='rf-fatal'; document.body.appendChild(box); }
-        box.style.cssText='position:fixed;inset:0;z-index:2147483647;background:#061412;color:#e8fffa;font:14px/1.45 Segoe UI,Arial,sans-serif;padding:32px;box-sizing:border-box;overflow:auto';
-        box.innerHTML='<h2 style="margin:0 0 12px">RehaFlow не зміг завантажити інтерфейс</h2><pre style="white-space:pre-wrap;opacity:.85">'+String(msg||'Невідома помилка').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))+'</pre><p style="opacity:.7">Відкрийте DevTools для технічної інформації.</p>';
+        if (!box) { box = document.createElement('div'); box.id = 'rf-fatal'; document.body.appendChild(box); }
+        box.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:#061412;color:#e8fffa;font:14px/1.45 Segoe UI,Arial,sans-serif;padding:32px;box-sizing:border-box;overflow:auto';
+        box.innerHTML = '<h2 style="margin:0 0 12px">RehaFlow не зміг завантажити інтерфейс</h2><pre style="white-space:pre-wrap;opacity:.85">' + String(msg || 'Невідома помилка').replace(/[&<>]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;' }[c])) + '</pre><p style="opacity:.7">Відкрийте DevTools для технічної інформації.</p>';
       };
-      if (document.body) render(); else window.addEventListener('DOMContentLoaded',render,{once:true});
+      if (document.body) render(); else window.addEventListener('DOMContentLoaded', render, { once: true });
     } catch {}
   };
   window.addEventListener('error', e => showFatal(e?.error?.stack || e?.message || 'JavaScript error'));
   window.addEventListener('unhandledrejection', e => showFatal(e?.reason?.stack || e?.reason || 'Unhandled promise rejection'));
 })();
-");
+""");
 
             var root = ResolveFrontendRoot();
             _browser.CoreWebView2.SetVirtualHostNameToFolderMapping("rehaflow.local", root, CoreWebView2HostResourceAccessKind.Allow);
