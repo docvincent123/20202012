@@ -1,300 +1,57 @@
-import type { Handler, HandlerEvent } from "@netlify/functions";
-import bcrypt from "bcryptjs";
-import crypto from "node:crypto";
+import type { Handler, HandlerEvent } from '@netlify/functions';
+import bcrypt from 'bcryptjs';
+import crypto from 'node:crypto';
 
-type SqlArg = string | number | bigint | boolean | null | ArrayBuffer | Uint8Array;
-type SqlResult = { rows: any[]; columns?: any[]; cols?: any[]; affectedRows?: number; lastInsertRowid?: any };
-
-function encodeArg(v: SqlArg) {
-  if (v === null || v === undefined) return { type: "null" };
-  if (v instanceof ArrayBuffer || v instanceof Uint8Array) {
-    const bytes = v instanceof Uint8Array ? v : new Uint8Array(v);
-    return { type: "blob", base64: Buffer.from(bytes).toString("base64") };
-  }
-  if (typeof v === "boolean") return { type: "integer", value: v ? "1" : "0" };
-  if (typeof v === "bigint") return { type: "integer", value: v.toString() };
-  if (typeof v === "number") return Number.isInteger(v) ? { type: "integer", value: String(v) } : { type: "float", value: String(v) };
-  return { type: "text", value: String(v) };
-}
-
-function getTursoHttpConfig() {
-  const rawUrl = process.env.TURSO_DATABASE_URL?.trim() || process.env.DATABASE_URL?.trim() || "libsql://rehaflow-echomedtechnologies.aws-ap-south-1.turso.io";
-  const token = process.env.TURSO_AUTH_TOKEN?.trim() || "";
-  if (!token) throw new Error("TURSO_AUTH_TOKEN is not configured in Netlify.");
-  let base = rawUrl.replace(/^\"|\"$/g, "").split("?")[0].replace(/\/+$/, "");
-  if (base.startsWith("libsql://")) base = base.replace(/^libsql:\/\//, "https://");
-  if (!base.startsWith("https://")) throw new Error("Invalid TURSO_DATABASE_URL. Expected libsql://<database>.turso.io");
-  return { endpoint: `${base}/v2/pipeline`, token };
-}
-
-class TursoHttpClient {
-  private endpoint: string;
-  private token: string;
-  constructor() { const c = getTursoHttpConfig(); this.endpoint = c.endpoint; this.token = c.token; }
-  private async request(requests: any[]): Promise<any[]> {
-    const res = await fetch(this.endpoint, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${this.token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ requests: [...requests, { type: "close" }] }),
-    });
-    const payload: any = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(`Turso HTTP ${res.status}: ${payload?.error?.message || payload?.message || res.statusText}`);
-    const results = payload.results || [];
-    for (const item of results) if (item?.type === "error") throw new Error(`Turso SQL error: ${item.error?.message || item.error || "Unknown error"}`);
-    return results.filter((x: any) => x?.response?.type === "execute").map((x: any) => x.response.result || {});
-  }
-  async execute(input: { sql: string; args?: SqlArg[] } | string): Promise<SqlResult> {
-    const stmt = typeof input === "string" ? { sql: input } : { sql: input.sql, ...(input.args?.length ? { args: input.args.map(encodeArg) } : {}) };
-    const r = (await this.request([{ type: "execute", stmt }]))[0] || {};
-    const cols = r.cols || r.columns || [];
-    const rows = (r.rows || []).map((row: any[]) => {
-      const obj: any = {};
-      cols.forEach((c: any, i: number) => {
-        const name = typeof c === "string" ? c : c.name;
-        const val = row[i];
-        obj[name] = val && typeof val === "object" && "value" in val ? val.value : val && typeof val === "object" && "base64" in val ? Buffer.from(val.base64, "base64") : val;
-      });
-      return obj;
-    });
-    return { rows, cols, columns: cols, affectedRows: Number(r.affected_row_count || 0), lastInsertRowid: r.last_insert_rowid };
-  }
-}
-
-let client: TursoHttpClient | null = null;
-let initialized = false;
-let initPromise: Promise<void> | null = null;
-function db() { if (!client) client = new TursoHttpClient(); return client; }
-function now() { return new Date().toISOString(); }
-function id(prefix: string) { return `${prefix}_${crypto.randomBytes(10).toString("hex")}`; }
-function token(bytes = 32) { return crypto.randomBytes(bytes).toString("hex"); }
-function hash(input: string) { return crypto.createHash("sha256").update(input).digest("hex"); }
-function json(body: any, status = 200) {
-  return {
-    statusCode: status,
-    headers: {
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client, X-Device-Id, X-Device-Name, X-Device-Platform, X-App-Version",
-      "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
-    },
-    body: JSON.stringify(body),
-  };
-}
-function parseBody(event: HandlerEvent): any { try { return event.body ? JSON.parse(event.body) : {}; } catch { return {}; } }
-function bearer(event: HandlerEvent) { const h = event.headers?.authorization || event.headers?.Authorization || ""; return h.startsWith("Bearer ") ? h.slice(7) : ""; }
-function query(event: HandlerEvent, key: string, fallback = "") { return event.queryStringParameters?.[key] ?? fallback; }
-
-const ROLE_PERMISSIONS: Record<string, string[]> = {
-  admin: ["*"],
-  manager: ["dashboard", "patients", "tasks", "beds", "documents", "schedule", "staff", "analytics", "reception"],
-  doctor: ["dashboard", "patients", "tasks", "documents", "schedule", "reception"],
-  nurse: ["dashboard", "patients", "tasks", "beds", "documents"],
-  registrar: ["dashboard", "patients", "reception", "schedule"],
-};
-
-async function ensureSchema() {
-  if (initialized) return;
-  if (initPromise) return initPromise;
-  initPromise = (async () => {
-    const c = db();
-    await c.execute(`CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT, name TEXT, password_hash TEXT, role TEXT DEFAULT 'doctor', active INTEGER DEFAULT 1, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
-    await c.execute(`CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT, access_token TEXT, refresh_token TEXT, expires_at TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
-    await c.execute(`CREATE TABLE IF NOT EXISTS login_history (id TEXT PRIMARY KEY, user_id TEXT, identifier TEXT, success INTEGER, ip TEXT, user_agent TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
-    await c.execute(`CREATE TABLE IF NOT EXISTS rf_patients (id TEXT PRIMARY KEY, first_name TEXT NOT NULL, last_name TEXT NOT NULL, middle_name TEXT, phone TEXT, birth_date TEXT, sex TEXT, diagnosis TEXT, room TEXT, bed INTEGER, status TEXT DEFAULT 'active', notes TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
-    await c.execute(`CREATE TABLE IF NOT EXISTS rf_tasks (id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT, patient_id TEXT, assigned_to TEXT, priority TEXT DEFAULT 'normal', status TEXT DEFAULT 'pending', due_at TEXT, created_by TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
-    await c.execute(`CREATE TABLE IF NOT EXISTS rf_beds (id TEXT PRIMARY KEY, room TEXT NOT NULL, bed_number INTEGER NOT NULL, status TEXT DEFAULT 'available', patient_id TEXT, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
-    await c.execute(`CREATE TABLE IF NOT EXISTS rf_appointments (id TEXT PRIMARY KEY, patient_id TEXT, doctor_id TEXT, starts_at TEXT NOT NULL, duration_minutes INTEGER DEFAULT 30, type TEXT DEFAULT 'consultation', status TEXT DEFAULT 'scheduled', notes TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
-    await c.execute(`CREATE TABLE IF NOT EXISTS rf_documents (id TEXT PRIMARY KEY, patient_id TEXT, title TEXT NOT NULL, category TEXT DEFAULT 'other', file_name TEXT, file_url TEXT, created_by TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
-    await c.execute(`CREATE TABLE IF NOT EXISTS rf_audit (id TEXT PRIMARY KEY, user_id TEXT, action TEXT, entity TEXT, entity_id TEXT, details TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
-
-    const adminEmail = process.env.DEFAULT_ADMIN_EMAIL?.trim() || "mishaborkovskijwork@gmail.com";
-    const adminPassword = process.env.DEFAULT_ADMIN_PASSWORD || "12345678";
-    const adminName = process.env.DEFAULT_ADMIN_NAME?.trim() || "System Administrator";
-    const existingAdmin = await c.execute({ sql: `SELECT id FROM users WHERE lower(email)=lower(?) LIMIT 1`, args: [adminEmail] });
-    if (existingAdmin.rows.length === 0) {
-      await c.execute({ sql: `INSERT INTO users(id,email,name,password_hash,role,active) VALUES(?,?,?,?,?,1)`, args: ["admin-default", adminEmail, adminName, await bcrypt.hash(adminPassword, 10), "admin"] });
-    }
-
-    const pc = await c.execute(`SELECT COUNT(*) AS count FROM rf_patients`);
-    if (Number(pc.rows[0]?.count || 0) === 0) {
-      const sample = [
-        ["Олег", "Іваненко", "+380671112233", "1978-04-12", "Гіпертонічна хвороба", "101", 1],
-        ["Марія", "Коваль", "+380672223344", "1989-08-19", "Пневмонія", "101", 2],
-        ["Андрій", "Бондар", "+380673334455", "1966-11-03", "Цукровий діабет 2 типу", "102", 1],
-        ["Ірина", "Шевчук", "+380674445566", "1992-02-21", "Гострий бронхіт", "102", 2],
-        ["Петро", "Мельник", "+380675556677", "1959-06-07", "Постінфарктний стан", "103", 1],
-      ];
-      for (const [first,last,phone,birth,diagnosis,room,bed] of sample) await c.execute({ sql: `INSERT INTO rf_patients(id,first_name,last_name,phone,birth_date,diagnosis,room,bed,status) VALUES(?,?,?,?,?,?,?,?,?)`, args: [id("pt"), first, last, phone, birth, diagnosis, room, bed, "active"] });
-    }
-
-    const bc = await c.execute(`SELECT COUNT(*) AS count FROM rf_beds`);
-    if (Number(bc.rows[0]?.count || 0) === 0) {
-      for (let i = 1; i <= 14; i++) {
-        const room = String(101 + Math.floor((i - 1) / 2));
-        const status = i <= 10 ? "occupied" : i === 11 ? "dirty" : i === 12 ? "maintenance" : "available";
-        const p = i <= 10 ? (await c.execute({ sql: `SELECT id FROM rf_patients ORDER BY created_at LIMIT 1 OFFSET ?`, args: [((i - 1) % 5)] })).rows[0]?.id || null : null;
-        await c.execute({ sql: `INSERT INTO rf_beds(id,room,bed_number,status,patient_id) VALUES(?,?,?,?,?)`, args: [id("bed"), room, i % 2 === 0 ? 2 : 1, status, p] });
-      }
-    }
-
-    const tc = await c.execute(`SELECT COUNT(*) AS count FROM rf_tasks`);
-    if (Number(tc.rows[0]?.count || 0) === 0) {
-      const titles = ["Контроль тиску · палата 101", "Крапельниця · палата 103", "Перев'язка · палата 104", "Огляд пацієнта", "Підготувати виписку"];
-      for (let i = 0; i < titles.length; i++) await c.execute({ sql: `INSERT INTO rf_tasks(id,title,description,priority,status,created_at) VALUES(?,?,?,?,?,?)`, args: [id("task"), titles[i], "Первинне оперативне завдання", i < 2 ? "critical" : i === 2 ? "high" : "normal", i < 2 ? "overdue" : "pending", now()] });
-    }
-    initialized = true;
-  })().catch(err => { initPromise = null; throw err; });
-  return initPromise;
-}
-
-async function currentUser(event: HandlerEvent) {
-  const t = bearer(event);
-  if (!t) return null;
-  const r = await db().execute({ sql: `SELECT u.id,u.email,u.name,u.role,u.active,s.expires_at FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.access_token=? LIMIT 1`, args: [hash(t)] });
-  const u: any = r.rows[0];
-  if (!u || String(u.active ?? 1) === "0" || (u.expires_at && new Date(String(u.expires_at)).getTime() < Date.now())) return null;
-  return { id: u.id, email: u.email, name: u.name, role: u.role || "doctor", active: Number(u.active ?? 1) };
-}
-async function requireUser(event: HandlerEvent) {
-  const user = await currentUser(event);
-  if (!user) throw Object.assign(new Error("Unauthorized"), { status: 401 });
-  return user;
-}
-function can(user: any, permission: string) { const list = ROLE_PERMISSIONS[user?.role] || []; return list.includes("*") || list.includes(permission); }
-function forbidden() { return Object.assign(new Error("Forbidden"), { status: 403 }); }
-async function audit(user: any, action: string, entity: string, entityId = "", details: any = {}) { await db().execute({ sql: `INSERT INTO rf_audit(id,user_id,action,entity,entity_id,details) VALUES(?,?,?,?,?,?)`, args: [id("audit"), user?.id ?? null, action, entity, entityId, JSON.stringify(details)] }); }
-
-async function auth(path: string, event: HandlerEvent) {
-  if (event.httpMethod === "OPTIONS") return json({ ok: true });
-  if (path === "/login" && event.httpMethod === "POST") {
-    const body = parseBody(event);
-    const identifier = String(body.email ?? body.login ?? body.username ?? body.identifier ?? "").trim();
-    const password = String(body.password ?? "");
-    if (!identifier || !password) return json({ error: "Email/login and password are required" }, 400);
-    const r = await db().execute({ sql: `SELECT id,email,name,password_hash,role,active FROM users WHERE lower(email)=lower(?) OR lower(name)=lower(?) LIMIT 1`, args: [identifier, identifier] });
-    const user: any = r.rows[0];
-    const ok = !!user && (String(user.password_hash || "").startsWith("$2") ? await bcrypt.compare(password, String(user.password_hash)) : String(user.password_hash || "") === password);
-    await db().execute({ sql: `INSERT INTO login_history(id,user_id,identifier,success,ip,user_agent) VALUES(?,?,?,?,?,?)`, args: [id("login"), user?.id ?? null, identifier, ok ? 1 : 0, event.headers?.["x-forwarded-for"] ?? null, event.headers?.["user-agent"] ?? null] });
-    if (!user || !ok || String(user.active ?? 1) === "0") return json({ error: "Invalid credentials" }, 401);
-    const accessToken = token(), refreshToken = token(), sessionId = id("sess");
-    const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 12).toISOString();
-    await db().execute({ sql: `INSERT INTO sessions(id,user_id,access_token,refresh_token,expires_at) VALUES(?,?,?,?,?)`, args: [sessionId, user.id, hash(accessToken), hash(refreshToken), expiresAt] });
-    return json({ accessToken, refreshToken, token: accessToken, session: { id: sessionId, expiresAt }, user: { id: user.id, email: user.email, name: user.name, role: user.role, active: Number(user.active ?? 1) } });
-  }
-  if (path === "/logout" && event.httpMethod === "POST") {
-    const t = bearer(event); if (t) await db().execute({ sql: `DELETE FROM sessions WHERE access_token=?`, args: [hash(t)] });
-    return json({ ok: true });
-  }
-  if ((path === "/me" || path === "/session") && event.httpMethod === "GET") {
-    const u = await currentUser(event); if (!u) return json({ error: "Unauthorized" }, 401);
-    return json({ authenticated: true, user: u });
-  }
-  return json({ error: "API endpoint not found" }, 404);
-}
-
-async function usersApi(path: string, event: HandlerEvent, user: any) {
-  if (!can(user, "staff")) throw forbidden();
-  if (path === "/users" && event.httpMethod === "GET") {
-    const q = query(event, "q");
-    const r = await db().execute({ sql: `SELECT id,email,name,role,active,created_at FROM users WHERE (?='' OR lower(email) LIKE lower(?) OR lower(name) LIKE lower(?)) ORDER BY name`, args: [q, `%${q}%`, `%${q}%`] });
-    return json({ users: r.rows });
-  }
-  if (path === "/users" && event.httpMethod === "POST") {
-    const b = parseBody(event); if (!b.email || !b.password || !b.name) return json({ error: "name, email and password are required" }, 400);
-    const exists = await db().execute({ sql: `SELECT id FROM users WHERE lower(email)=lower(?) LIMIT 1`, args: [String(b.email).trim()] });
-    if (exists.rows.length) return json({ error: "Email already exists" }, 409);
-    const newId = id("usr");
-    await db().execute({ sql: `INSERT INTO users(id,email,name,password_hash,role,active) VALUES(?,?,?,?,?,?)`, args: [newId, String(b.email).trim(), String(b.name).trim(), await bcrypt.hash(String(b.password), 10), String(b.role || "doctor"), b.active === false ? 0 : 1] });
-    await audit(user, "create", "user", newId, { role: b.role });
-    return json({ user: { id: newId, email: b.email, name: b.name, role: b.role || "doctor", active: b.active === false ? 0 : 1 } }, 201);
-  }
-  const m = path.match(/^\/users\/([^/]+)$/);
-  if (m && event.httpMethod === "PATCH") {
-    const b = parseBody(event); const sets: string[] = []; const args: any[] = [];
-    if (b.name !== undefined) { sets.push("name=?"); args.push(b.name); }
-    if (b.role !== undefined) { sets.push("role=?"); args.push(b.role); }
-    if (b.active !== undefined) { sets.push("active=?"); args.push(b.active ? 1 : 0); }
-    if (b.password) { sets.push("password_hash=?"); args.push(await bcrypt.hash(String(b.password), 10)); }
-    if (!sets.length) return json({ ok: true });
-    args.push(m[1]); await db().execute({ sql: `UPDATE users SET ${sets.join(",")} WHERE id=?`, args });
-    await audit(user, "update", "user", m[1], b); return json({ ok: true });
-  }
-  if (m && event.httpMethod === "DELETE") { if (m[1] === user.id) return json({ error: "You cannot delete your own account" }, 400); await db().execute({ sql: `DELETE FROM users WHERE id=?`, args: [m[1]] }); await audit(user, "delete", "user", m[1]); return json({ ok: true }); }
-  if (path === "/roles" && event.httpMethod === "GET") return json({ roles: Object.entries(ROLE_PERMISSIONS).map(([role, permissions]) => ({ role, permissions })) });
-  return json({ error: "API endpoint not found" }, 404);
-}
-
-async function patientsApi(path: string, event: HandlerEvent, user: any) {
-  if (!can(user, "patients")) throw forbidden();
-  if (path === "/patients" && event.httpMethod === "GET") {
-    const q = query(event, "q"); const status = query(event, "status", "active"); const limit = Math.min(Number(query(event, "limit", "500")) || 500, 1000);
-    const r = await db().execute({ sql: `SELECT * FROM rf_patients WHERE (?='' OR status=?) AND (?='' OR lower(first_name||' '||last_name) LIKE lower(?) OR lower(phone) LIKE lower(?)) ORDER BY last_name,first_name LIMIT ?`, args: [status, status, q, `%${q}%`, `%${q}%`, limit] });
-    return json({ patients: r.rows, items: r.rows });
-  }
-  if (path === "/patients" && event.httpMethod === "POST") {
-    const b = parseBody(event); if (!b.firstName && !b.first_name || !b.lastName && !b.last_name) return json({ error: "First and last name are required" }, 400);
-    const newId = id("pt");
-    await db().execute({ sql: `INSERT INTO rf_patients(id,first_name,last_name,middle_name,phone,birth_date,sex,diagnosis,room,bed,status,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, args: [newId, b.firstName ?? b.first_name, b.lastName ?? b.last_name, b.middleName ?? b.middle_name ?? null, b.phone ?? null, b.birthDate ?? b.birth_date ?? null, b.sex ?? null, b.diagnosis ?? null, b.room ?? null, b.bed ?? null, b.status ?? "active", b.notes ?? null] });
-    await audit(user, "create", "patient", newId, b); return json({ patient: { id: newId, ...b } }, 201);
-  }
-  const m = path.match(/^\/patients\/([^/]+)$/);
-  if (m && event.httpMethod === "GET") { const r = await db().execute({ sql: `SELECT * FROM rf_patients WHERE id=? LIMIT 1`, args: [m[1]] }); if (!r.rows[0]) return json({ error: "Patient not found" }, 404); return json({ patient: r.rows[0] }); }
-  if (m && (event.httpMethod === "PATCH" || event.httpMethod === "PUT")) {
-    const b = parseBody(event); const map: Record<string,string> = { firstName:"first_name", lastName:"last_name", middleName:"middle_name", phone:"phone", birthDate:"birth_date", sex:"sex", diagnosis:"diagnosis", room:"room", bed:"bed", status:"status", notes:"notes" }; const sets: string[] = [], args: any[] = [];
-    for (const [k,col] of Object.entries(map)) if (b[k] !== undefined) { sets.push(`${col}=?`); args.push(b[k]); }
-    sets.push("updated_at=?"); args.push(now(), m[1]); await db().execute({ sql: `UPDATE rf_patients SET ${sets.join(",")} WHERE id=?`, args }); await audit(user, "update", "patient", m[1], b); return json({ ok: true });
-  }
-  if (m && event.httpMethod === "DELETE") { await db().execute({ sql: `DELETE FROM rf_patients WHERE id=?`, args: [m[1]] }); await audit(user, "delete", "patient", m[1]); return json({ ok: true }); }
-  return json({ error: "API endpoint not found" }, 404);
-}
-
-async function tasksApi(path: string, event: HandlerEvent, user: any) {
-  if (!can(user, "tasks")) throw forbidden();
-  if (path === "/tasks" && event.httpMethod === "GET") {
-    const status = query(event, "status"); const priority = query(event, "priority");
-    const r = await db().execute({ sql: `SELECT t.*, p.first_name||' '||p.last_name patient_name, u.name assignee_name FROM rf_tasks t LEFT JOIN rf_patients p ON p.id=t.patient_id LEFT JOIN users u ON u.id=t.assigned_to WHERE (?='' OR t.status=?) AND (?='' OR t.priority=?) ORDER BY CASE t.priority WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'normal' THEN 3 ELSE 4 END, t.created_at DESC`, args: [status,status,priority,priority] });
-    return json({ tasks: r.rows, items: r.rows });
-  }
-  if (path === "/tasks" && event.httpMethod === "POST") {
-    const b = parseBody(event); if (!b.title) return json({ error: "title is required" }, 400); const newId=id("task");
-    await db().execute({ sql:`INSERT INTO rf_tasks(id,title,description,patient_id,assigned_to,priority,status,due_at,created_by) VALUES(?,?,?,?,?,?,?,?,?)`, args:[newId,b.title,b.description??null,b.patientId??null,b.assignedTo??null,b.priority??"normal",b.status??"pending",b.dueAt??null,user.id] });
-    await audit(user,"create","task",newId,b); return json({ task:{id:newId,...b,status:b.status??"pending"} },201);
-  }
-  const m=path.match(/^\/tasks\/([^/]+)$/);
-  if(m && (event.httpMethod==="PATCH"||event.httpMethod==="PUT")){const b=parseBody(event);const map:Record<string,string>={title:"title",description:"description",patientId:"patient_id",assignedTo:"assigned_to",priority:"priority",status:"status",dueAt:"due_at"};const sets:string[]=[],args:any[]=[];for(const[k,col]of Object.entries(map))if(b[k]!==undefined){sets.push(`${col}=?`);args.push(b[k]);}sets.push("updated_at=?");args.push(now(),m[1]);await db().execute({sql:`UPDATE rf_tasks SET ${sets.join(",")} WHERE id=?`,args});await audit(user,"update","task",m[1],b);return json({ok:true});}
-  if(m&&event.httpMethod==="DELETE"){await db().execute({sql:`DELETE FROM rf_tasks WHERE id=?`,args:[m[1]]});await audit(user,"delete","task",m[1]);return json({ok:true});}
-  return json({error:"API endpoint not found"},404);
-}
-
-async function bedsApi(path:string,event:HandlerEvent,user:any){if(!can(user,"beds"))throw forbidden();if(path==="/beds"&&event.httpMethod==="GET"){const r=await db().execute(`SELECT b.*,p.first_name||' '||p.last_name patient_name FROM rf_beds b LEFT JOIN rf_patients p ON p.id=b.patient_id ORDER BY b.room,b.bed_number`);return json({beds:r.rows});}const m=path.match(/^\/beds\/([^/]+)$/);if(m&&(event.httpMethod==="PATCH"||event.httpMethod==="PUT")){const b=parseBody(event);await db().execute({sql:`UPDATE rf_beds SET status=?,patient_id=?,updated_at=? WHERE id=?`,args:[b.status??"available",b.patientId??null,now(),m[1]]});await audit(user,"update","bed",m[1],b);return json({ok:true});}return json({error:"API endpoint not found"},404);}
-
-async function appointmentsApi(path:string,event:HandlerEvent,user:any){if(!can(user,"schedule"))throw forbidden();if(path==="/appointments"&&event.httpMethod==="GET"){const from=query(event,"from");const to=query(event,"to");const r=await db().execute({sql:`SELECT a.*,p.first_name||' '||p.last_name patient_name,u.name doctor_name FROM rf_appointments a LEFT JOIN rf_patients p ON p.id=a.patient_id LEFT JOIN users u ON u.id=a.doctor_id WHERE (?='' OR a.starts_at>=?) AND (?='' OR a.starts_at<=?) ORDER BY a.starts_at`,args:[from,from,to,to]});return json({appointments:r.rows});}if(path==="/appointments"&&event.httpMethod==="POST"){const b=parseBody(event);if(!b.startsAt)return json({error:"startsAt is required"},400);const newId=id("apt");await db().execute({sql:`INSERT INTO rf_appointments(id,patient_id,doctor_id,starts_at,duration_minutes,type,status,notes) VALUES(?,?,?,?,?,?,?,?)`,args:[newId,b.patientId??null,b.doctorId??user.id,b.startsAt,b.durationMinutes??30,b.type??"consultation",b.status??"scheduled",b.notes??null]});await audit(user,"create","appointment",newId,b);return json({appointment:{id:newId,...b}},201);}const m=path.match(/^\/appointments\/([^/]+)$/);if(m&&(event.httpMethod==="PATCH"||event.httpMethod==="PUT")){const b=parseBody(event);await db().execute({sql:`UPDATE rf_appointments SET patient_id=?,doctor_id=?,starts_at=?,duration_minutes=?,type=?,status=?,notes=? WHERE id=?`,args:[b.patientId??null,b.doctorId??user.id,b.startsAt,b.durationMinutes??30,b.type??"consultation",b.status??"scheduled",b.notes??null,m[1]]});return json({ok:true});}if(m&&event.httpMethod==="DELETE"){await db().execute({sql:`DELETE FROM rf_appointments WHERE id=?`,args:[m[1]]});return json({ok:true});}return json({error:"API endpoint not found"},404);}
-
-async function documentsApi(path:string,event:HandlerEvent,user:any){if(!can(user,"documents"))throw forbidden();if(path==="/documents"&&event.httpMethod==="GET"){const patientId=query(event,"patientId");const r=await db().execute({sql:`SELECT d.*,p.first_name||' '||p.last_name patient_name,u.name created_by_name FROM rf_documents d LEFT JOIN rf_patients p ON p.id=d.patient_id LEFT JOIN users u ON u.id=d.created_by WHERE (?='' OR d.patient_id=?) ORDER BY d.created_at DESC`,args:[patientId,patientId]});return json({documents:r.rows});}if(path==="/documents"&&event.httpMethod==="POST"){const b=parseBody(event);if(!b.title)return json({error:"title is required"},400);const newId=id("doc");await db().execute({sql:`INSERT INTO rf_documents(id,patient_id,title,category,file_name,file_url,created_by) VALUES(?,?,?,?,?,?,?)`,args:[newId,b.patientId??null,b.title,b.category??"other",b.fileName??null,b.fileUrl??null,user.id]});return json({document:{id:newId,...b}},201);}return json({error:"API endpoint not found"},404);}
-
-async function analyticsApi(path:string,event:HandlerEvent,user:any){if(!can(user,"analytics"))throw forbidden();if(path==="/dashboard"||path==="/analytics"){const [p,t,b,a,s]=await Promise.all([db().execute(`SELECT COUNT(*) count FROM rf_patients WHERE status='active'`),db().execute(`SELECT COUNT(*) count FROM rf_tasks WHERE status NOT IN ('done','completed')`),db().execute(`SELECT COUNT(*) count FROM rf_beds WHERE status='occupied'`),db().execute(`SELECT COUNT(*) count FROM rf_beds WHERE status='available'`),db().execute(`SELECT COUNT(*) count FROM users WHERE active=1`)]);return json({stats:{patients:Number(p.rows[0]?.count||0),openTasks:Number(t.rows[0]?.count||0),occupiedBeds:Number(b.rows[0]?.count||0),availableBeds:Number(a.rows[0]?.count||0),staffOnline:Number(s.rows[0]?.count||0)},generatedAt:now()});}return json({error:"API endpoint not found"},404);}
-
-export const handler: Handler = async (event) => {
-  try {
-    await ensureSchema();
-    const path = event.path.replace(/^\/.netlify\/functions\/api/, "").replace(/^\/api\/baas/, "").replace(/^\/api/, "") || "/";
-    if (event.httpMethod === "OPTIONS") return json({ ok:true });
-    if (path.startsWith("/auth/")) return await auth(path.slice(5), event);
-    const user = await requireUser(event);
-    if (path === "/health" && event.httpMethod === "GET") return json({ ok:true, service:"rehaflow-api", time:now() });
-    if (path === "/" && event.httpMethod === "GET") return json({ ok:true, service:"rehaflow-api" });
-    if (path.startsWith("/users") || path === "/roles") return await usersApi(path,event,user);
-    if (path.startsWith("/patients")) return await patientsApi(path,event,user);
-    if (path.startsWith("/tasks")) return await tasksApi(path,event,user);
-    if (path.startsWith("/beds")) return await bedsApi(path,event,user);
-    if (path.startsWith("/appointments")) return await appointmentsApi(path,event,user);
-    if (path.startsWith("/documents")) return await documentsApi(path,event,user);
-    if (path === "/dashboard" || path === "/analytics" || path === "/analytics/summary") return await analyticsApi(path,event,user);
-    if (path === "/permissions" && event.httpMethod === "GET") return json({ role:user.role, permissions:ROLE_PERMISSIONS[user.role]||[] });
-    if (path === "/audit" && event.httpMethod === "GET") { if (!can(user,"staff")) throw forbidden(); const r=await db().execute(`SELECT a.*,u.name user_name FROM rf_audit a LEFT JOIN users u ON u.id=a.user_id ORDER BY a.created_at DESC LIMIT 300`); return json({audit:r.rows}); }
-    return json({ error:"API endpoint not found", path },404);
-  } catch (error:any) {
-    console.error(error);
-    return json({ error:error?.message || String(error) }, error?.status || 500);
-  }
-};
+type Arg=string|number|bigint|boolean|null|ArrayBuffer|Uint8Array;
+const now=()=>new Date().toISOString();
+const rid=(p='rf')=>`${p}_${crypto.randomBytes(10).toString('hex')}`;
+const header=(e:HandlerEvent,n:string)=>e.headers?.[n.toLowerCase()]||e.headers?.[n]||'';
+const body=(e:HandlerEvent):any=>{try{return e.body?JSON.parse(e.body):{}}catch{return {}}};
+const hash=(v:string)=>crypto.createHash('sha256').update(v).digest('hex');
+const bearer=(e:HandlerEvent)=>{const h=header(e,'authorization');return h.startsWith('Bearer ')?h.slice(7):''};
+const json=(x:any,status=200)=>({statusCode:status,headers:{'Content-Type':'application/json','Access-Control-Allow-Origin':'*','Access-Control-Allow-Headers':'Content-Type, Authorization, X-Client, X-Device-Id, X-Device-Name, X-Device-Platform, X-App-Version','Access-Control-Allow-Methods':'GET,POST,PUT,PATCH,DELETE,OPTIONS'},body:JSON.stringify(x)});
+function enc(v:Arg){if(v===null||v===undefined)return{type:'null'};if(v instanceof ArrayBuffer||v instanceof Uint8Array)return{type:'blob',base64:Buffer.from(v instanceof Uint8Array?v:new Uint8Array(v)).toString('base64')};if(typeof v==='boolean')return{type:'integer',value:v?'1':'0'};if(typeof v==='bigint')return{type:'integer',value:v.toString()};if(typeof v==='number')return Number.isInteger(v)?{type:'integer',value:String(v)}:{type:'float',value:String(v)};return{type:'text',value:String(v)}}
+class DB{endpoint:string;token:string;constructor(){let u=(process.env.TURSO_DATABASE_URL||process.env.DATABASE_URL||'libsql://rehaflow-echomedtechnologies.aws-ap-south-1.turso.io').trim().replace(/^\"|\"$/g,'').split('?')[0].replace(/\/+$/,'');if(u.startsWith('libsql://'))u=u.replace(/^libsql:\/\//,'https://');this.endpoint=`${u}/v2/pipeline`;this.token=(process.env.TURSO_AUTH_TOKEN||'').trim();if(!this.token)throw new Error('TURSO_AUTH_TOKEN is not configured in Netlify.')}
+async exec(sql:string,args:Arg[]=[]){const r=await fetch(this.endpoint,{method:'POST',headers:{Authorization:`Bearer ${this.token}`,'Content-Type':'application/json'},body:JSON.stringify({requests:[{type:'execute',stmt:{sql,...(args.length?{args:args.map(enc)}:{})}},{type:'close'}]})});const p:any=await r.json().catch(()=>({}));if(!r.ok)throw new Error(`Turso HTTP ${r.status}: ${p?.error?.message||p?.message||r.statusText}`);for(const i of p.results||[])if(i?.type==='error')throw new Error(`Turso SQL error: ${i.error?.message||i.error}`);const z:any=(p.results||[]).find((i:any)=>i?.response?.type==='execute')?.response?.result||{};const cols=z.cols||z.columns||[];const rows=(z.rows||[]).map((rr:any[])=>{const o:any={};cols.forEach((c:any,i:number)=>{const n=typeof c==='string'?c:c.name;const v=rr[i];o[n]=v&&typeof v==='object'&&'value'in v?v:v&&typeof v==='object'&&'base64'in v?Buffer.from(v.base64,'base64'):v});return o});return{rows,cols,affectedRows:Number(z.affected_row_count||0)}}}
+let client:DB|null=null;const db=()=>client||(client=new DB());
+const perms:Record<string,string[]>={admin:['*'],manager:['dashboard','patients','archive','reception','beds','tasks','orders','documents','staff','analytics'],doctor:['dashboard','patients','archive','reception','beds','tasks','orders','documents'],nurse:['dashboard','patients','archive','beds','tasks','orders','documents'],registrar:['dashboard','patients','archive','reception']};
+const can=(u:any,p:string)=>{const a=perms[u?.role]||[];return a.includes('*')||a.includes(p)};const forbid=()=>Object.assign(new Error('Forbidden'),{status:403});
+async function audit(u:any,a:string,e:string,i:string,d:any={}){try{await db().exec(`INSERT INTO rf_audit(id,user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)`,[rid('audit'),u?.id||null,a,e,i,JSON.stringify(d),now()])}catch{}}
+let ready=false;let preparing:Promise<void>|null=null;
+async function init(){if(ready)return;if(preparing)return preparing;preparing=(async()=>{const c=db();
+await c.exec(`CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,email TEXT,name TEXT,password_hash TEXT,role TEXT DEFAULT 'doctor',active INTEGER DEFAULT 1,created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
+await c.exec(`CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,user_id TEXT,access_token TEXT,refresh_token TEXT,expires_at TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
+await c.exec(`CREATE TABLE IF NOT EXISTS login_history(id TEXT PRIMARY KEY,user_id TEXT,identifier TEXT,success INTEGER,ip TEXT,user_agent TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
+await c.exec(`CREATE TABLE IF NOT EXISTS rf_rooms(id TEXT PRIMARY KEY,name TEXT NOT NULL,department TEXT,active INTEGER DEFAULT 1,created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
+await c.exec(`CREATE TABLE IF NOT EXISTS rf_beds(id TEXT PRIMARY KEY,room_id TEXT NOT NULL,number INTEGER NOT NULL,code TEXT UNIQUE NOT NULL,qr_payload TEXT UNIQUE NOT NULL,status TEXT DEFAULT 'available',patient_id TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
+await c.exec(`CREATE TABLE IF NOT EXISTS rf_patients(id TEXT PRIMARY KEY,first_name TEXT NOT NULL,last_name TEXT NOT NULL,middle_name TEXT,phone TEXT,birth_date TEXT,diagnosis TEXT,status TEXT DEFAULT 'active',current_bed_id TEXT,admitted_at TEXT,discharged_at TEXT,notes TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
+await c.exec(`CREATE TABLE IF NOT EXISTS rf_bed_history(id TEXT PRIMARY KEY,patient_id TEXT,bed_id TEXT,started_at TEXT,ended_at TEXT,reason TEXT)`);
+await c.exec(`CREATE TABLE IF NOT EXISTS rf_tasks(id TEXT PRIMARY KEY,title TEXT NOT NULL,description TEXT,patient_id TEXT,assigned_to TEXT,priority TEXT DEFAULT 'normal',status TEXT DEFAULT 'pending',due_at TEXT,created_by TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
+await c.exec(`CREATE TABLE IF NOT EXISTS rf_prescriptions(id TEXT PRIMARY KEY,patient_id TEXT,doctor_id TEXT,drug TEXT,dose TEXT,route TEXT,frequency TEXT,start_at TEXT,end_at TEXT,status TEXT DEFAULT 'active',note TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
+await c.exec(`CREATE TABLE IF NOT EXISTS rf_documents(id TEXT PRIMARY KEY,patient_id TEXT,title TEXT NOT NULL,category TEXT DEFAULT 'other',content TEXT,created_by TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
+await c.exec(`CREATE TABLE IF NOT EXISTS rf_audit(id TEXT PRIMARY KEY,user_id TEXT,action TEXT,entity TEXT,entity_id TEXT,details TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
+for(const q of ['ALTER TABLE sessions ADD COLUMN last_seen_at TEXT','ALTER TABLE sessions ADD COLUMN device_id TEXT','ALTER TABLE sessions ADD COLUMN device_name TEXT','ALTER TABLE sessions ADD COLUMN platform TEXT','ALTER TABLE sessions ADD COLUMN app_version TEXT','ALTER TABLE sessions ADD COLUMN ip TEXT','ALTER TABLE sessions ADD COLUMN user_agent TEXT'])try{await c.exec(q)}catch{}
+const adminEmail=(process.env.DEFAULT_ADMIN_EMAIL||'mishaborkovskijwork@gmail.com').trim(),adminPass=process.env.DEFAULT_ADMIN_PASSWORD||'12345678';const a=await c.exec(`SELECT id FROM users WHERE lower(email)=lower(?) LIMIT 1`,[adminEmail]);if(!a.rows.length)await c.exec(`INSERT INTO users(id,email,name,password_hash,role,active) VALUES(?,?,?,?,?,1)`,['admin-default',adminEmail,process.env.DEFAULT_ADMIN_NAME||'System Administrator',await bcrypt.hash(adminPass,10),'admin']);
+const rc=await c.exec(`SELECT COUNT(*) c FROM rf_rooms`);if(!Number(rc.rows[0]?.c||0))for(const n of ['101','102','103','104','105','106','107'])await c.exec(`INSERT INTO rf_rooms(id,name,department) VALUES(?,?,?)`,[rid('room'),`Палата ${n}`,'Реабілітація']);
+const bc=await c.exec(`SELECT COUNT(*) c FROM rf_beds`);if(!Number(bc.rows[0]?.c||0)){const rs=(await c.exec(`SELECT id FROM rf_rooms ORDER BY name`)).rows;for(const r of rs)for(let n=1;n<=2;n++){const code=`BED-${crypto.randomBytes(5).toString('hex').toUpperCase()}`;await c.exec(`INSERT INTO rf_beds(id,room_id,number,code,qr_payload,status) VALUES(?,?,?,?,?,'available')`,[rid('bed'),r.id,n,code,`rehaflow://bed/${code}`])}}
+ready=true})().catch(e=>{preparing=null;throw e});return preparing}
+async function user(e:HandlerEvent){const t=bearer(e);if(!t)return null;const r=await db().exec(`SELECT u.id,u.email,u.name,u.role,u.active,s.id session_id,s.expires_at FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.access_token=? LIMIT 1`,[hash(t)]);const u:any=r.rows[0];if(!u||Number(u.active??1)===0||new Date(String(u.expires_at)).getTime()<Date.now())return null;await db().exec(`UPDATE sessions SET last_seen_at=? WHERE id=?`,[now(),u.session_id]);return{id:u.id,email:u.email,name:u.name,role:u.role||'doctor',active:Number(u.active??1),sessionId:u.session_id}}
+async function auth(e:HandlerEvent){const b=body(e),i=String(b.email??b.login??b.username??b.identifier??'').trim(),p=String(b.password??'');if(!i||!p)return json({error:'Email/login and password are required'},400);const r=await db().exec(`SELECT id,email,name,password_hash,role,active FROM users WHERE lower(email)=lower(?) OR lower(name)=lower(?) LIMIT 1`,[i,i]);const u:any=r.rows[0];const ok=!!u&&(String(u.password_hash||'').startsWith('$2')?await bcrypt.compare(p,String(u.password_hash)):String(u.password_hash||'')===p);await db().exec(`INSERT INTO login_history(id,user_id,identifier,success,ip,user_agent,created_at) VALUES(?,?,?,?,?,?,?)`,[rid('login'),u?.id||null,i,ok?1:0,header(e,'x-forwarded-for')||'',header(e,'user-agent')||'',now()]);if(!u||!ok||Number(u.active??0)===0)return json({error:'Invalid credentials'},401);const at=crypto.randomBytes(32).toString('hex'),rt=crypto.randomBytes(32).toString('hex'),sid=rid('sess'),exp=new Date(Date.now()+12*3600e3).toISOString();await db().exec(`INSERT INTO sessions(id,user_id,access_token,refresh_token,expires_at,last_seen_at,device_id,device_name,platform,app_version,ip,user_agent) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,[sid,u.id,hash(at),hash(rt),exp,now(),header(e,'x-device-id')||'web',header(e,'x-device-name')||'RehaFlow',header(e,'x-device-platform')||'web',header(e,'x-app-version')||'',header(e,'x-forwarded-for')||'',header(e,'user-agent')||'']);return json({accessToken:at,refreshToken:rt,token:at,session:{id:sid,expiresAt:exp},user:{id:u.id,email:u.email,name:u.name,role:u.role,active:Number(u.active??1)}})}
+async function bind(patientId:string,bedId:string,u:any){const p=(await db().exec(`SELECT id,current_bed_id FROM rf_patients WHERE id=?`,[patientId])).rows[0],b=(await db().exec(`SELECT id,patient_id FROM rf_beds WHERE id=?`,[bedId])).rows[0];if(!p||!b)throw new Error('Patient or bed not found');if(b.patient_id&&b.patient_id!==patientId)throw new Error('Bed is already occupied');if(p.current_bed_id&&p.current_bed_id!==bedId)await release(String(p.current_bed_id),u,true);await db().exec(`UPDATE rf_beds SET patient_id=?,status='occupied',updated_at=? WHERE id=?`,[patientId,now(),bedId]);await db().exec(`UPDATE rf_patients SET current_bed_id=?,status='active',updated_at=? WHERE id=?`,[bedId,now(),patientId]);await db().exec(`INSERT INTO rf_bed_history(id,patient_id,bed_id,started_at) VALUES(?,?,?,?)`,[rid('bh'),patientId,bedId,now()]);}
+async function release(bedId:string,u:any,silent=false){const b=(await db().exec(`SELECT patient_id FROM rf_beds WHERE id=?`,[bedId])).rows[0];if(!b)return;if(b.patient_id){await db().exec(`UPDATE rf_patients SET current_bed_id=NULL,updated_at=? WHERE id=?`,[now(),b.patient_id]);await db().exec(`UPDATE rf_bed_history SET ended_at=? WHERE patient_id=? AND bed_id=? AND ended_at IS NULL`,[now(),b.patient_id,bedId])}await db().exec(`UPDATE rf_beds SET patient_id=NULL,status='cleaning',updated_at=? WHERE id=?`,[now(),bedId]);if(!silent)await audit(u,'release','bed',bedId,{patientId:b.patient_id})}
+export const handler:Handler=async(e)=>{try{await init();if(e.httpMethod==='OPTIONS')return json({ok:true});let p=(e.path||'/').replace(/^\/.netlify\/functions\/(api|baas)/,'').replace(/^\/api\/baas/,'').replace(/^\/api/,'')||'/';if(p==='/health'&&e.httpMethod==='GET')return json({ok:true,service:'rehaflow-api',time:now()});if(p==='/auth/login'&&e.httpMethod==='POST')return auth(e);if(p==='/auth/logout'&&e.httpMethod==='POST'){const t=bearer(e);if(t)await db().exec(`DELETE FROM sessions WHERE access_token=?`,[hash(t)]);return json({ok:true})}const u=await user(e);if(!u)return json({error:'Unauthorized'},401);if(p==='/auth/me')return json({user:u});
+if(p==='/dashboard') {const a=await db().exec(`SELECT COUNT(*) c FROM rf_patients WHERE status='active'`),b=await db().exec(`SELECT status,COUNT(*) c FROM rf_beds GROUP BY status`),t=await db().exec(`SELECT COUNT(*) c FROM rf_tasks WHERE status NOT IN ('done','cancelled')`),s=await db().exec(`SELECT COUNT(*) c FROM sessions WHERE datetime(expires_at)>datetime('now') AND datetime(COALESCE(last_seen_at,created_at))>datetime('now','-15 minutes')`);const m:any={};b.rows.forEach(x=>m[x.status]=Number(x.c||0));return json({stats:{patients:Number(a.rows[0]?.c||0),occupiedBeds:m.occupied||0,availableBeds:m.available||0,cleaningBeds:m.cleaning||0,openTasks:Number(t.rows[0]?.c||0),staffOnline:Number(s.rows[0]?.c||0)}})}
+if(p==='/patients'&&e.httpMethod==='GET'){const st=String(e.queryStringParameters?.status||'active'),q=String(e.queryStringParameters?.q||'');const args:any[]=[st];let sql=`SELECT p.*,b.number bed_number,b.code bed_code,r.name room_name FROM rf_patients p LEFT JOIN rf_beds b ON b.id=p.current_bed_id LEFT JOIN rf_rooms r ON r.id=b.room_id WHERE p.status=?`;if(q){const x=`%${q}%`;sql+=` AND (lower(p.first_name) LIKE lower(?) OR lower(p.last_name) LIKE lower(?) OR lower(coalesce(p.phone,'')) LIKE lower(?) OR lower(coalesce(p.diagnosis,'')) LIKE lower(?))`;args.push(x,x,x,x)}sql+=' ORDER BY p.updated_at DESC LIMIT 1000';return json({patients:(await db().exec(sql,args)).rows})}
+if(p==='/patients/archive')return json({patients:(await db().exec(`SELECT * FROM rf_patients WHERE status='archived' ORDER BY discharged_at DESC`)).rows});
+if(p==='/patients/history')return json({history:(await db().exec(`SELECT h.*,p.first_name,p.last_name,b.number bed_number,r.name room_name FROM rf_bed_history h LEFT JOIN rf_patients p ON p.id=h.patient_id LEFT JOIN rf_beds b ON b.id=h.bed_id LEFT JOIN rf_rooms r ON r.id=b.room_id ORDER BY h.started_at DESC LIMIT 1000`)).rows});
+if(p==='/patients'&&e.httpMethod==='POST'){if(!can(u,'reception'))throw forbid();const b=body(e),pid=rid('pt');await db().exec(`INSERT INTO rf_patients(id,first_name,last_name,middle_name,phone,birth_date,diagnosis,status,admitted_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'active',?,?,?)`,[pid,b.firstName||'',b.lastName||'',b.middleName||'',b.phone||'',b.birthDate||'',b.diagnosis||'',now(),now(),now()]);if(b.bedId)await bind(pid,String(b.bedId),u);await audit(u,'create','patient',pid,b);return json({id:pid})}
+const pm=p.match(/^\/patients\/([^/]+)$/);if(pm&&e.httpMethod==='PATCH'){if(!can(u,'patients'))throw forbid();const b=body(e);await db().exec(`UPDATE rf_patients SET first_name=?,last_name=?,middle_name=?,phone=?,birth_date=?,diagnosis=?,notes=?,updated_at=? WHERE id=?`,[b.firstName||'',b.lastName||'',b.middleName||'',b.phone||'',b.birthDate||'',b.diagnosis||'',b.notes||'',now(),pm[1]]);return json({ok:true})}if(pm&&e.httpMethod==='DELETE'){if(!can(u,'patients'))throw forbid();const b=(await db().exec(`SELECT current_bed_id FROM rf_patients WHERE id=?`,[pm[1]])).rows[0]?.current_bed_id;await db().exec(`UPDATE rf_patients SET status='archived',discharged_at=?,updated_at=? WHERE id=?`,[now(),now(),pm[1]]);if(b)await release(String(b),u);return json({ok:true})}
+if(p==='/rooms'&&e.httpMethod==='GET')return json({rooms:(await db().exec(`SELECT r.*,COUNT(b.id) bed_count,SUM(CASE WHEN b.status='occupied' THEN 1 ELSE 0 END) occupied_count FROM rf_rooms r LEFT JOIN rf_beds b ON b.room_id=r.id GROUP BY r.id ORDER BY r.name`)).rows});if(p==='/rooms'&&e.httpMethod==='POST'){if(!can(u,'beds'))throw forbid();const b=body(e),x=rid('room');await db().exec(`INSERT INTO rf_rooms(id,name,department) VALUES(?,?,?)`,[x,b.name,b.department||'']);return json({id:x})}
+if(p==='/beds'&&e.httpMethod==='GET')return json({beds:(await db().exec(`SELECT b.*,r.name room_name,r.department,p.first_name,p.last_name FROM rf_beds b LEFT JOIN rf_rooms r ON r.id=b.room_id LEFT JOIN rf_patients p ON p.id=b.patient_id ORDER BY r.name,b.number`)).rows});if(p==='/beds'&&e.httpMethod==='POST'){if(!can(u,'beds'))throw forbid();const b=body(e),x=rid('bed'),code=`BED-${crypto.randomBytes(5).toString('hex').toUpperCase()}`;await db().exec(`INSERT INTO rf_beds(id,room_id,number,code,qr_payload,status) VALUES(?,?,?,?,?,'available')`,[x,b.roomId,b.number,code,`rehaflow://bed/${code}`]);return json({id:x,code})}
+const bm=p.match(/^\/beds\/([^/]+)(?:\/(assign|release))?$/);if(bm){const bid=bm[1],act=bm[2];if(!can(u,'beds'))throw forbid();if(act==='assign'&&e.httpMethod==='POST'){await bind(String(body(e).patientId),bid,u);return json({ok:true})}if(act==='release'&&e.httpMethod==='POST'){await release(bid,u);return json({ok:true})}if(e.httpMethod==='PATCH'){const b=body(e);if(b.patientId)await bind(String(b.patientId),bid,u);if(b.status)await db().exec(`UPDATE rf_beds SET status=?,updated_at=? WHERE id=?`,[b.status,now(),bid]);return json({ok:true})}}
+if(p==='/tasks'&&e.httpMethod==='GET')return json({tasks:(await db().exec(`SELECT t.*,u.name assignee_name,p.first_name,p.last_name FROM rf_tasks t LEFT JOIN users u ON u.id=t.assigned_to LEFT JOIN rf_patients p ON p.id=t.patient_id ORDER BY CASE t.priority WHEN 'critical' THEN 1 WHEN 'high' THEN 2 ELSE 3 END,t.created_at DESC LIMIT 1000`)).rows});if(p==='/tasks'&&e.httpMethod==='POST'){if(!can(u,'tasks'))throw forbid();const b=body(e),x=rid('task');await db().exec(`INSERT INTO rf_tasks(id,title,description,patient_id,assigned_to,priority,status,due_at,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,[x,b.title,b.description||'',b.patientId||null,b.assignedTo||null,b.priority||'normal',b.status||'pending',b.dueAt||null,u.id,now(),now()]);return json({id:x})}const tm=p.match(/^\/tasks\/([^/]+)$/);if(tm&&e.httpMethod==='PATCH'){const b=body(e);await db().exec(`UPDATE rf_tasks SET title=?,description=?,patient_id=?,assigned_to=?,priority=?,status=?,due_at=?,updated_at=? WHERE id=?`,[b.title,b.description||'',b.patientId||null,b.assignedTo||null,b.priority||'normal',b.status||'pending',b.dueAt||null,now(),tm[1]]);return json({ok:true})}if(tm&&e.httpMethod==='DELETE'){await db().exec(`DELETE FROM rf_tasks WHERE id=?`,[tm[1]]);return json({ok:true})}
+if(p==='/prescriptions'&&e.httpMethod==='GET')return json({prescriptions:(await db().exec(`SELECT x.*,p.first_name,p.last_name,u.name doctor_name FROM rf_prescriptions x LEFT JOIN rf_patients p ON p.id=x.patient_id LEFT JOIN users u ON u.id=x.doctor_id ORDER BY x.created_at DESC`)).rows});if(p==='/prescriptions'&&e.httpMethod==='POST'){if(!can(u,'orders'))throw forbid();const b=body(e),x=rid('rx');await db().exec(`INSERT INTO rf_prescriptions(id,patient_id,doctor_id,drug,dose,route,frequency,start_at,end_at,status,note,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,[x,b.patientId,u.id,b.drug,b.dose||'',b.route||'',b.frequency||'',b.startAt||null,b.endAt||null,b.status||'active',b.note||'',now()]);return json({id:x})}
+if(p==='/documents'&&e.httpMethod==='GET'){const pid=e.queryStringParameters?.patientId;return json({documents:(await db().exec(pid?`SELECT * FROM rf_documents WHERE patient_id=? ORDER BY created_at DESC`:`SELECT d.*,p.first_name,p.last_name FROM rf_documents d LEFT JOIN rf_patients p ON p.id=d.patient_id ORDER BY d.created_at DESC LIMIT 1000`,pid?[pid]:[])).rows})}if(p==='/documents'&&e.httpMethod==='POST'){if(!can(u,'documents'))throw forbid();const b=body(e),x=rid('doc');await db().exec(`INSERT INTO rf_documents(id,patient_id,title,category,content,created_by,created_at) VALUES(?,?,?,?,?,?,?)`,[x,b.patientId||null,b.title,b.category||'other',b.content||'',u.id,now()]);return json({id:x})}
+if(p==='/users'&&e.httpMethod==='GET'){if(!can(u,'staff'))throw forbid();return json({users:(await db().exec(`SELECT id,email,name,role,active,created_at FROM users ORDER BY name`)).rows})}if(p==='/users'&&e.httpMethod==='POST'){if(!can(u,'staff'))throw forbid();const b=body(e),x=rid('usr');if(!b.email||!b.password||!b.role)return json({error:'Email, password and role are required'},400);await db().exec(`INSERT INTO users(id,email,name,password_hash,role,active) VALUES(?,?,?,?,?,?)`,[x,b.email,b.name||'',await bcrypt.hash(b.password,10),b.role,Number(b.active??1)]);return json({id:x})}const um=p.match(/^\/users\/([^/]+)$/);if(um&&e.httpMethod==='PATCH'){if(!can(u,'staff'))throw forbid();const b=body(e);let sql=`UPDATE users SET email=?,name=?,role=?,active=?`,a:any[]=[b.email,b.name||'',b.role,Number(b.active??1)];if(b.password){sql+=`,password_hash=?`;a.push(await bcrypt.hash(b.password,10))}sql+=' WHERE id=?';a.push(um[1]);await db().exec(sql,a);return json({ok:true})}if(um&&e.httpMethod==='DELETE'){if(!can(u,'staff'))throw forbid();await db().exec(`UPDATE users SET active=0 WHERE id=?`,[um[1]]);return json({ok:true})}
+if(p==='/roles'&&e.httpMethod==='GET')return json({roles:Object.keys(perms).map(r=>({role:r,permissions:perms[r]}))});if(p==='/admin/sessions'&&e.httpMethod==='GET'){if(!can(u,'staff'))throw forbid();return json({sessions:(await db().exec(`SELECT s.id,s.created_at,s.last_seen_at,s.expires_at,s.device_id,s.device_name,s.platform,s.app_version,s.ip,u.name user_name,u.email,u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE datetime(s.expires_at)>datetime('now') ORDER BY datetime(COALESCE(s.last_seen_at,s.created_at)) DESC`)).rows})}const sm=p.match(/^\/admin\/sessions\/([^/]+)$/);if(sm&&e.httpMethod==='DELETE'){if(!can(u,'staff'))throw forbid();await db().exec(`DELETE FROM sessions WHERE id=?`,[sm[1]]);return json({ok:true})}if(p==='/audit'&&e.httpMethod==='GET'){if(!can(u,'staff'))throw forbid();return json({audit:(await db().exec(`SELECT a.*,u.name user_name FROM rf_audit a LEFT JOIN users u ON u.id=a.user_id ORDER BY a.created_at DESC LIMIT 1000`)).rows})}
+return json({error:'API endpoint not found',path:p},404)}catch(err:any){console.error(err);return json({error:err?.message||String(err)},Number(err?.status)||500)}};
