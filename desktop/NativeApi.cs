@@ -48,7 +48,7 @@ public sealed class NativeApi
         request.Headers.TryAddWithoutValidation("X-Device-Id", "windows-desktop");
         request.Headers.TryAddWithoutValidation("X-Device-Name", "RehaFlow Command Center");
         request.Headers.TryAddWithoutValidation("X-Device-Platform", "windows");
-        request.Headers.TryAddWithoutValidation("X-App-Version", "0.1.0");
+        request.Headers.TryAddWithoutValidation("X-App-Version", "0.20.0");
         if (!string.IsNullOrWhiteSpace(token))
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         if (!string.IsNullOrWhiteSpace(body))
@@ -60,11 +60,11 @@ public sealed class NativeApi
         try { data = string.IsNullOrWhiteSpace(raw) ? null : JsonNode.Parse(raw); }
         catch (JsonException) { }
 
-        if (response.StatusCode == System.Net.HttpStatusCode.NotFound || IsNotFoundPayload(data, raw))
-            throw new ApiRouteNotFoundException();
-
         if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
             throw new InvalidOperationException("RF_AUTH_EXPIRED");
+
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound || IsNotFoundPayload(data, raw))
+            throw new ApiRouteNotFoundException();
 
         if (!response.IsSuccessStatusCode)
             throw new InvalidOperationException(ExtractMessage(data, raw, (int)response.StatusCode));
