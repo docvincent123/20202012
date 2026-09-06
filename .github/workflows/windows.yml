@@ -62,10 +62,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag='v0.1.0'
+          $tag='v0.20.0'
           gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
           if($LASTEXITCODE -ne 0){
-            gh release create $tag desktop/release/RehaFlow.CommandCenter.exe --repo $env:GITHUB_REPOSITORY --title 'RehaFlow Command Center v0.1.0' --notes 'First Windows Command Center test build using Netlify API.'
+            gh release create $tag desktop/release/RehaFlow.CommandCenter.exe --repo $env:GITHUB_REPOSITORY --title 'RehaFlow Command Center v0.20.0' --notes 'Windows Command Center build connected to the live Netlify API and Turso data layer.'
           } else {
             gh release upload $tag desktop/release/RehaFlow.CommandCenter.exe --repo $env:GITHUB_REPOSITORY --clobber
           }
