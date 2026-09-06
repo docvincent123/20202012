@@ -45,6 +45,19 @@ public partial class MainWindow : Window
     pending.set(id,{resolve,reject});
     chrome.webview.postMessage(JSON.stringify({...request,id,type:'api'}));
   });
+  const showFatal = msg => {
+    try {
+      const render = () => {
+        let box = document.getElementById('rf-fatal');
+        if (!box) { box = document.createElement('div'); box.id='rf-fatal'; document.body.appendChild(box); }
+        box.style.cssText='position:fixed;inset:0;z-index:2147483647;background:#061412;color:#e8fffa;font:14px/1.45 Segoe UI,Arial,sans-serif;padding:32px;box-sizing:border-box;overflow:auto';
+        box.innerHTML='<h2 style="margin:0 0 12px">RehaFlow не зміг завантажити інтерфейс</h2><pre style="white-space:pre-wrap;opacity:.85">'+String(msg||'Невідома помилка').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))+'</pre><p style="opacity:.7">Відкрийте DevTools для технічної інформації.</p>';
+      };
+      if (document.body) render(); else window.addEventListener('DOMContentLoaded',render,{once:true});
+    } catch {}
+  };
+  window.addEventListener('error', e => showFatal(e?.error?.stack || e?.message || 'JavaScript error'));
+  window.addEventListener('unhandledrejection', e => showFatal(e?.reason?.stack || e?.reason || 'Unhandled promise rejection'));
 })();
 ");
 
@@ -64,8 +77,6 @@ public partial class MainWindow : Window
         string id = string.Empty;
         try
         {
-            // chrome.webview.postMessage(string) is surfaced by WebView2 as a string payload.
-            // Parse the actual message string rather than e.WebMessageAsJson directly.
             var message = e.TryGetWebMessageAsString();
             if (string.IsNullOrWhiteSpace(message)) return;
 
@@ -82,6 +93,10 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            if (string.Equals(ex.Message, "RF_AUTH_EXPIRED", StringComparison.Ordinal))
+            {
+                try { await _browser.CoreWebView2.ExecuteScriptAsync("window.dispatchEvent(new CustomEvent('rf-auth-expired')); "); } catch { }
+            }
             if (!string.IsNullOrWhiteSpace(id)) await ResolveNativeAsync(id, false, JsonValue.Create(ex.Message));
         }
     }
