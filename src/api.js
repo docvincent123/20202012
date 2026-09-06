@@ -1,17 +1,39 @@
 const API = 'https://gregarious-frangollo-24145c.netlify.app/api/baas';
 const DIRECT = 'https://gregarious-frangollo-24145c.netlify.app/.netlify/functions/api';
-export async function apiFetch(path, options={}){
-  const token=localStorage.getItem('rf-token');
-  const headers={'Accept':'application/json','Content-Type':'application/json',...(options.headers||{})};
+
+async function nativeApi(path, options = {}) {
+  if (typeof window !== 'undefined' && typeof window.__rfNativeApi === 'function') {
+    const token = localStorage.getItem('rf-token');
+    return window.__rfNativeApi({
+      method: options.method || 'GET',
+      path,
+      body: options.body || null,
+      token
+    });
+  }
+  return null;
+}
+
+export async function apiFetch(path, options = {}) {
+  try {
+    const native = await nativeApi(path, options);
+    if (native !== null) return native;
+  } catch (e) {
+    throw e instanceof Error ? e : new Error(String(e));
+  }
+
+  const token = localStorage.getItem('rf-token');
+  const headers = {'Accept':'application/json','Content-Type':'application/json',...(options.headers||{})};
   if(token) headers.Authorization=`Bearer ${token}`;
   let res;
-  try{res=await fetch(API+path,{...options,headers});}
-  catch(e){res=await fetch(DIRECT+path,{...options,headers});}
+  try { res=await fetch(API+path,{...options,headers}); }
+  catch(e) { res=await fetch(DIRECT+path,{...options,headers}); }
   const text=await res.text();
   let data=null; try{data=text?JSON.parse(text):null;}catch{}
   if(!res.ok) throw new Error(data?.error?.message||data?.message||text||`HTTP ${res.status}`);
   return data;
 }
+
 export async function login(identifier,password){
   const body={email:identifier,login:identifier,username:identifier,identifier,password,client:'desktop',deviceId:'windows-desktop'};
   const data=await apiFetch('/auth/login',{method:'POST',body:JSON.stringify(body)});
@@ -20,6 +42,7 @@ export async function login(identifier,password){
   if(data?.user) localStorage.setItem('rf-user',JSON.stringify(data.user));
   return data;
 }
+
 export const getPatients=()=>apiFetch('/patients?status=active&limit=500');
 export const getTasks=()=>apiFetch('/tasks?limit=500');
 export const getMe=()=>apiFetch('/auth/me');
