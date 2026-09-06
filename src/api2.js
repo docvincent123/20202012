@@ -1,0 +1,37 @@
+const API='https://gregarious-frangollo-24145c.netlify.app/api/baas';
+const native=async(path,options={})=>{if(typeof window!=='undefined'&&typeof window.__rfNativeApi==='function'){return window.__rfNativeApi({method:options.method||'GET',path,body:options.body||null,token:localStorage.getItem('rf-token')})}return null};
+export async function apiFetch(path,options={}){try{const n=await native(path,options);if(n!==null)return n}catch(e){throw e instanceof Error?e:new Error(String(e))}const h={Accept:'application/json','Content-Type':'application/json',...(options.headers||{})};const t=localStorage.getItem('rf-token');if(t)h.Authorization=`Bearer ${t}`;const r=await fetch(API+path,{...options,headers:h});const text=await r.text();let d=null;try{d=text?JSON.parse(text):null}catch{}if(!r.ok)throw new Error(d?.error?.message||d?.error||d?.message||text||`HTTP ${r.status}`);return d}
+export async function login(identifier,password){const d=await apiFetch('/auth/login',{method:'POST',body:JSON.stringify({email:identifier,password,client:'desktop',deviceId:'windows-desktop',deviceName:navigator?.userAgent?.includes('Windows')?'RehaFlow Windows':'RehaFlow Desktop',platform:'windows'})});const t=d?.accessToken||d?.token;if(t)localStorage.setItem('rf-token',t);if(d?.user)localStorage.setItem('rf-user',JSON.stringify(d.user));return d}
+export const logout=async()=>{try{await apiFetch('/auth/logout',{method:'POST',body:'{}'})}finally{localStorage.removeItem('rf-token');localStorage.removeItem('rf-user')}};
+export const me=()=>apiFetch('/auth/me');
+export const getDashboard=()=>apiFetch('/dashboard');
+export const getPatients=(q='')=>apiFetch(`/patients?status=active&limit=1000${q?`&q=${encodeURIComponent(q)}`:''}`);
+export const getPatient=id=>apiFetch(`/patients/${id}`);
+export const createPatient=b=>apiFetch('/patients',{method:'POST',body:JSON.stringify(b)});
+export const updatePatient=(id,b)=>apiFetch(`/patients/${id}`,{method:'PATCH',body:JSON.stringify(b)});
+export const archivePatient=id=>apiFetch(`/patients/${id}/archive`,{method:'POST',body:'{}'});
+export const getArchive=()=>apiFetch('/archive');
+export const getPatientHistory=()=>apiFetch('/patient-history');
+export const getRooms=()=>apiFetch('/rooms');
+export const createRoom=b=>apiFetch('/rooms',{method:'POST',body:JSON.stringify(b)});
+export const getBeds=()=>apiFetch('/beds');
+export const createBed=b=>apiFetch('/beds',{method:'POST',body:JSON.stringify(b)});
+export const assignBed=(id,patientId)=>apiFetch(`/beds/${id}`,{method:'PATCH',body:JSON.stringify({patientId})});
+export const releaseBed=id=>apiFetch(`/beds/${id}/release`,{method:'POST',body:'{}'});
+export const getTasks=()=>apiFetch('/tasks');
+export const createTask=b=>apiFetch('/tasks',{method:'POST',body:JSON.stringify(b)});
+export const updateTask=(id,b)=>apiFetch(`/tasks/${id}`,{method:'PATCH',body:JSON.stringify(b)});
+export const deleteTask=id=>apiFetch(`/tasks/${id}`,{method:'DELETE'});
+export const getPrescriptions=()=>apiFetch('/prescriptions');
+export const createPrescription=b=>apiFetch('/prescriptions',{method:'POST',body:JSON.stringify(b)});
+export const getDocuments=(patientId='')=>apiFetch(`/documents${patientId?`?patientId=${encodeURIComponent(patientId)}`:''}`);
+export const createDocument=b=>apiFetch('/documents',{method:'POST',body:JSON.stringify(b)});
+export const getUsers=(q='')=>apiFetch(`/users${q?`?q=${encodeURIComponent(q)}`:''}`);
+export const createUser=b=>apiFetch('/users',{method:'POST',body:JSON.stringify(b)});
+export const updateUser=(id,b)=>apiFetch(`/users/${id}`,{method:'PATCH',body:JSON.stringify(b)});
+export const deleteUser=id=>apiFetch(`/users/${id}`,{method:'DELETE'});
+export const getRoles=()=>apiFetch('/roles');
+export const getSessions=()=>apiFetch('/sessions');
+export const revokeSession=id=>apiFetch(`/sessions/${id}`,{method:'DELETE'});
+export const getAudit=()=>apiFetch('/audit');
+export const getDoctors=()=>apiFetch('/staff/doctors');
