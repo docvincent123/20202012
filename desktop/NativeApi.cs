@@ -9,35 +9,13 @@ namespace RehaFlow.CommandCenter;
 
 public sealed class NativeApi
 {
-    private const string SiteBase = "https://gregarious-frangollo-24145c.netlify.app";
-    private static readonly string[] ApiBases =
-    {
-        SiteBase + "/api/baas",
-        SiteBase + "/.netlify/functions/baas",
-        SiteBase + "/.netlify/functions/api",
-        SiteBase + "/api"
-    };
-
+    private const string ApiBase = "https://gregarious-frangollo-24145c.netlify.app/api/baas";
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(30) };
 
     public async Task<JsonNode?> SendAsync(string method, string path, string? body, string? token, CancellationToken cancellationToken = default)
     {
         if (!path.StartsWith('/')) path = "/" + path;
-
-        Exception? lastError = null;
-        foreach (var baseUrl in ApiBases)
-        {
-            try
-            {
-                return await SendOnceAsync(method, baseUrl.TrimEnd('/') + path, body, token, cancellationToken);
-            }
-            catch (ApiRouteNotFoundException ex)
-            {
-                lastError = ex;
-            }
-        }
-
-        throw lastError ?? new InvalidOperationException("API endpoint не знайдено.");
+        return await SendOnceAsync(method, ApiBase.TrimEnd('/') + path, body, token, cancellationToken);
     }
 
     private async Task<JsonNode?> SendOnceAsync(string method, string url, string? body, string? token, CancellationToken cancellationToken)
@@ -63,9 +41,6 @@ public sealed class NativeApi
         if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
             throw new InvalidOperationException("RF_AUTH_EXPIRED");
 
-        if (response.StatusCode == System.Net.HttpStatusCode.NotFound || IsNotFoundPayload(data, raw))
-            throw new ApiRouteNotFoundException();
-
         if (!response.IsSuccessStatusCode)
             throw new InvalidOperationException(ExtractMessage(data, raw, (int)response.StatusCode));
 
@@ -74,20 +49,6 @@ public sealed class NativeApi
 
         return data;
     }
-
-    private static bool IsNotFoundPayload(JsonNode? data, string raw)
-    {
-        if (data is JsonObject obj && obj["error"] is JsonValue e)
-        {
-            var message = e.ToString();
-            if (message.Contains("endpoint not found", StringComparison.OrdinalIgnoreCase))
-                return true;
-        }
-        return raw.Contains("<title>Page not found</title>", StringComparison.OrdinalIgnoreCase)
-            || raw.Contains("<!DOCTYPE html", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private sealed class ApiRouteNotFoundException : Exception { }
 
     private static string ExtractMessage(JsonNode? data, string raw, int status)
     {
@@ -98,10 +59,7 @@ public sealed class NativeApi
             if (obj["error"] is JsonValue value) return value.ToString();
             if (obj["message"] is JsonValue msg) return msg.ToString();
         }
-
         var text = (raw ?? string.Empty).Trim();
-        if (text.Contains("<title>Page not found</title>", StringComparison.OrdinalIgnoreCase) || text.Contains("<!DOCTYPE html", StringComparison.OrdinalIgnoreCase))
-            return $"API endpoint не знайдено (HTTP {status}).";
         if (text.Length > 800) text = text[..800];
         return string.IsNullOrWhiteSpace(text) ? $"HTTP {status}" : text;
     }
