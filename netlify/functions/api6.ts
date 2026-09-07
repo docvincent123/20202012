@@ -8,7 +8,7 @@ const now = () => new Date().toISOString();
 const uid = (p: string) => `${p}_${crypto.randomBytes(8).toString('hex')}`;
 const secret = () => crypto.randomBytes(32).toString('hex');
 const sha = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
-const json = (body: any, statusCode = 200) => ({ statusCode, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type,Authorization,X-Device-Id,X-Device-Name,X-Device-Platform,X-App-Version', 'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS' }, body: JSON.stringify(body) });
+const json = (body: any, statusCode = 200) => ({ statusCode, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-RehaFlow-Data-Source':'Turso', 'X-RehaFlow-API':'rehab-v2', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type,Authorization,X-Device-Id,X-Device-Name,X-Device-Platform,X-App-Version', 'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS' }, body: JSON.stringify(body) });
 const body = (e: HandlerEvent) => { try { return e.body ? JSON.parse(e.body) : {}; } catch { return {}; } };
 const q = (e: HandlerEvent, k: string, d = '') => e.queryStringParameters?.[k] ?? d;
 const bearer = (e: HandlerEvent) => { const h = e.headers?.authorization || e.headers?.Authorization || ''; return h.startsWith('Bearer ') ? h.slice(7) : ''; };
@@ -19,7 +19,7 @@ class Turso {
   url: string;
   token: string;
   constructor() {
-    let base = (process.env.TURSO_DATABASE_URL || process.env.DATABASE_URL || DEFAULT_DB).trim().split('?')[0].replace(/\/+$/, '');
+    let base = DEFAULT_DB.trim().split('?')[0].replace(/\/+$/, '');
     if (base.startsWith('libsql://')) base = base.replace('libsql://', 'https://');
     this.url = `${base}/v2/pipeline`;
     this.token = (process.env.TURSO_AUTH_TOKEN || '').trim();
@@ -70,7 +70,6 @@ function patientOut(p: any, extra: any = {}) {
   return { ...p, id: p.id, fullName: p.fullName, last_name: n.lastName, first_name: n.firstName, middle_name: n.middleName || null, birth_date: p.birthDate ?? null, sex: p.gender ?? null, phone: p.phone ?? null, address: p.address ?? null, diagnosis: p.diagnosis ?? null, admission_date: p.admissionDate ?? null, discharged_at: p.dischargeDate ?? null, status: p.status, notes: p.notes ?? null, allergies: p.allergies ?? null, contraindications: p.contraindications ?? null, anamnesis: p.anamnesis ?? null, rehabGoals: p.rehabGoals ?? null, functionalAssessment: p.functionalAssessment ?? null, emergencyContact: p.emergencyContact ?? null, dischargeSummary: p.dischargeSummary ?? null, room_id: p.roomId ?? null, bed_id: p.bedId ?? null, attending_doctor_id: p.doctorId ?? null, ...extra };
 }
 function userOut(u: any) { return { id: u.id, email: u.email, name: u.name, role: u.role, active: Number(u.active ?? 1), emailVerified: Number(u.emailVerified ?? 1), twoFactorEnabled: Number(u.twoFactorEnabled ?? 0), lastLoginAt: u.lastLoginAt ?? null, createdAt: u.createdAt ?? null }; }
-function effectiveRole(role: string) { return role === 'reception' ? 'registrar' : role; }
 async function current(e: HandlerEvent) {
   const t = bearer(e); if (!t) return null;
   const r = await db().run(`SELECT u.id,u.email,u.name,u.role,u.active,u.emailVerified,u.twoFactorEnabled,s.id sessionId,s.expiresAt FROM Session s JOIN User u ON u.id=s.userId WHERE s.tokenHash=? LIMIT 1`, [sha(t)]);
@@ -90,8 +89,8 @@ async function auth(path: string, e: HandlerEvent) {
     const r = await db().run('SELECT * FROM User WHERE lower(email)=lower(?) OR lower(name)=lower(?) LIMIT 1', [ident, ident]);
     const u: any = r.rows[0];
     let ok = false;
-    if (u && !u.lockedUntil || (u && (!u.lockedUntil || new Date(u.lockedUntil).getTime() < Date.now()))) { const ph = String(u?.password || ''); ok = ph.startsWith('$2') ? await bcrypt.compare(pass, ph) : false; }
-    if (!ok) { await db().run('INSERT INTO FailedLogin(id,email,ip,userAgent,createdAt) VALUES(?,?,?,?,?)', [uid('fail'), ident, e.headers?.['x-forwarded-for'] || null, e.headers?.['user-agent'] || null, now()]); }
+    if (u && (!u.lockedUntil || new Date(u.lockedUntil).getTime() < Date.now())) { const ph = String(u?.password || ''); ok = ph.startsWith('$2') ? await bcrypt.compare(pass, ph) : false; }
+    if (!ok) await db().run('INSERT INTO FailedLogin(id,email,ip,userAgent,createdAt) VALUES(?,?,?,?,?)', [uid('fail'), ident, e.headers?.['x-forwarded-for'] || null, e.headers?.['user-agent'] || null, now()]);
     if (!u || !ok || Number(u.active) !== 1) return json({ error: 'Invalid credentials' }, 401);
     const at = secret(), sid = uid('sess'), exp = new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString();
     await db().run('INSERT INTO Session(id,userId,tokenHash,expiresAt,createdAt,deviceId,deviceName,devicePlatform,deviceModel,appVersion,ip,userAgent,lastSeenAt) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)', [sid, u.id, sha(at), exp, now(), b.deviceId || 'windows-desktop', b.deviceName || 'RehaFlow Windows', b.platform || 'windows', b.deviceModel || '', b.appVersion || '', e.headers?.['x-forwarded-for'] || null, e.headers?.['user-agent'] || null, now()]);
@@ -117,8 +116,8 @@ async function patients(path: string, e: HandlerEvent, u: any) {
   }
   if (path.startsWith('/patients/') && ['PUT','PATCH'].includes(e.httpMethod || '')) {
     const id = path.split('/')[2], b = body(e); const cols: string[] = [], vals: V[] = [];
-    const map: Record<string,string> = { fullName:'fullName', firstName:'fullName', birthDate:'birthDate', birth_date:'birthDate', gender:'gender', sex:'gender', phone:'phone', address:'address', diagnosis:'diagnosis', notes:'notes', roomId:'roomId', room_id:'roomId', doctorId:'doctorId', attendingDoctorId:'doctorId', bedId:'bedId', bed_id:'bedId', allergies:'allergies', contraindications:'contraindications', anamnesis:'anamnesis', rehabGoals:'rehabGoals', functionalAssessment:'functionalAssessment', emergencyContact:'emergencyContact', dischargeSummary:'dischargeSummary' };
-    for (const [k,c] of Object.entries(map)) if (b[k] !== undefined && !cols.includes(c)) { let v = b[k]; if (c==='fullName' && b.firstName) v = [b.lastName,b.firstName,b.middleName].filter(Boolean).join(' '); cols.push(c); vals.push(v ?? null); }
+    const map: Record<string,string> = { fullName:'fullName', firstName:'fullName', lastName:'fullName', middleName:'fullName', birthDate:'birthDate', birth_date:'birthDate', gender:'gender', sex:'gender', phone:'phone', address:'address', diagnosis:'diagnosis', notes:'notes', roomId:'roomId', room_id:'roomId', doctorId:'doctorId', attendingDoctorId:'doctorId', bedId:'bedId', bed_id:'bedId', allergies:'allergies', contraindications:'contraindications', anamnesis:'anamnesis', rehabGoals:'rehabGoals', functionalAssessment:'functionalAssessment', emergencyContact:'emergencyContact', dischargeSummary:'dischargeSummary' };
+    for (const [k,c] of Object.entries(map)) if (b[k] !== undefined && !cols.includes(c)) { let v = b[k]; if (c==='fullName' && (b.firstName || b.lastName || b.middleName)) v = [b.lastName,b.firstName,b.middleName].filter(Boolean).join(' '); cols.push(c); vals.push(v ?? null); }
     if (!cols.length) return json({ error: 'No changes' }, 400);
     cols.push('updatedAt'); vals.push(now()); vals.push(id); await db().run(`UPDATE Patient SET ${cols.map(c=>`${c}=?`).join(',')} WHERE id=?`, vals); await audit(u, 'update', 'Patient', id, { fields: cols }, e); return json({ ok:true });
   }
@@ -136,7 +135,7 @@ async function archive(path:string,e:HandlerEvent,u:any){
 async function roomsBeds(path:string,e:HandlerEvent,u:any){
   if(path==='/rooms'&&e.httpMethod==='GET'){const rows=(await db().run('SELECT * FROM Room ORDER BY number')).rows;return json({rooms:rows.map((r:any)=>({...r,name:`Палата ${r.number}`,department:r.building||'Реабілітація',active:1}))});}
   if(path==='/rooms'&&e.httpMethod==='POST'){const b=body(e),id=uid('room'),num=String(b.number||b.name||'').replace(/[^0-9A-Za-zА-Яа-яІіЇїЄє_-]/g,'');if(!num)return json({error:'Room number is required'},400);const at=now();await db().run('INSERT INTO Room(id,number,building,capacity,createdAt) VALUES(?,?,?,?,?)',[id,num,b.building||'Реабілітація',Number(b.capacity||2),at]);await audit(u,'create','Room',id,b,e);return json({ok:true,id},201);}
-  if(path==='/beds'&&e.httpMethod==='GET'){const rows=(await db().run(`SELECT b.*,r.number roomNumber,r.building roomBuilding,p.fullName patientName FROM Bed b LEFT JOIN Room r ON r.id=b.roomId LEFT JOIN Patient p ON p.bedId=b.id AND p.status='active' ORDER BY r.number,b.label,b.code`)).rows;return json({beds:rows.map((b:any)=>({...b,room_id:b.roomId,number:b.label,patient_id:b.patientName?b.patientId:null,room_name:b.roomNumber?`Палата ${b.roomNumber}`:null,room_building:b.roomBuilding||null,patient_name:b.patientName||null}))});}
+  if(path==='/beds'&&e.httpMethod==='GET'){const rows=(await db().run(`SELECT b.*,r.number roomNumber,r.building roomBuilding,p.fullName patientName FROM Bed b LEFT JOIN Room r ON r.id=b.roomId LEFT JOIN Patient p ON p.bedId=b.id AND p.status='active' ORDER BY r.number,b.label,b.code`)).rows;return json({beds:rows.map((b:any)=>({...b,room_id:b.roomId,number:b.label,patient_id:b.patientId||null,room_name:b.roomNumber?`Палата ${b.roomNumber}`:null,room_building:b.roomBuilding||null,patient_name:b.patientName||null}))});}
   if(path==='/beds'&&e.httpMethod==='POST'){const b=body(e),id=uid('bed'),at=now(),label=String(b.label||b.number||'A'),code=String(b.code||`BED-${crypto.randomBytes(6).toString('hex').toUpperCase()}`);await db().run('INSERT INTO Bed(id,roomId,code,label,createdAt,status) VALUES(?,?,?,?,?,?)',[id,b.roomId||b.room_id,code,label,at,b.status||'available']);await audit(u,'create','Bed',id,b,e);return json({ok:true,id},201);}
   if(path.startsWith('/beds/')&&e.httpMethod==='POST'){const parts=path.split('/');const id=parts[2],action=parts[3];if(action==='assign'){const b=body(e),pid=b.patientId||b.patient_id;if(!pid)return json({error:'patientId required'},400);const cur=await db().run('SELECT bedId FROM Patient WHERE id=?',[pid]);if(cur.rows[0]?.bedId)await db().run('UPDATE Bed SET status=\'available\' WHERE id=?',[cur.rows[0].bedId]);await db().run('UPDATE Patient SET bedId=?,roomId=(SELECT roomId FROM Bed WHERE id=?),updatedAt=? WHERE id=?',[id,id,now(),pid]);await db().run('UPDATE Bed SET status=\'occupied\' WHERE id=?',[id]);await audit(u,'assign','Bed',id,{patientId:pid},e);return json({ok:true});}if(action==='release'){const r=await db().run('SELECT id FROM Patient WHERE bedId=? AND status=\'active\'',[id]);for(const p of r.rows)await db().run('UPDATE Patient SET bedId=NULL,roomId=NULL,updatedAt=? WHERE id=?',[now(),p.id]);await db().run('UPDATE Bed SET status=\'available\' WHERE id=?',[id]);await audit(u,'release','Bed',id,{},e);return json({ok:true});}}
   return null;
@@ -188,7 +187,6 @@ async function users(path:string,e:HandlerEvent,u:any){
   return null;
 }
 
-async function rolesEndpoint(path:string,e:HandlerEvent){ if(path==='/roles'&&e.httpMethod==='GET') return null; return null; }
 async function dashboard(path:string,e:HandlerEvent){
   if(path!=='/dashboard'||e.httpMethod!=='GET')return null;
   const [p,b,t,s,a]=await Promise.all([
@@ -203,6 +201,19 @@ async function dashboard(path:string,e:HandlerEvent){
 
 async function auditEndpoint(path:string,e:HandlerEvent,u:any){if(path==='/audit'&&e.httpMethod==='GET'){const rows=(await db().run('SELECT * FROM AuditLog ORDER BY createdAt DESC LIMIT 500')).rows;return json({audit:rows});}return null;}
 
+async function health(path:string,e:HandlerEvent,u:any){
+  if(path!=='/health'||e.httpMethod!=='GET')return null;
+  const [users,patients,rooms,beds,tasks,appointments]=await Promise.all([
+    db().run('SELECT COUNT(*) c FROM User'),
+    db().run('SELECT COUNT(*) c FROM Patient'),
+    db().run('SELECT COUNT(*) c FROM Room'),
+    db().run('SELECT COUNT(*) c FROM Bed'),
+    db().run('SELECT COUNT(*) c FROM PatientTask'),
+    db().run('SELECT COUNT(*) c FROM Appointment')
+  ]);
+  return json({ok:true,api:'rehab-v2',dataSource:'Turso',database:'libsql://rehaflow-echomedtechnologies.aws-ap-south-1.turso.io',tables:{User:Number(users.rows[0]?.c||0),Patient:Number(patients.rows[0]?.c||0),Room:Number(rooms.rows[0]?.c||0),Bed:Number(beds.rows[0]?.c||0),PatientTask:Number(tasks.rows[0]?.c||0),Appointment:Number(appointments.rows[0]?.c||0)}});
+}
+
 export const handler: Handler = async (e) => {
   try {
     await init();
@@ -211,7 +222,7 @@ export const handler: Handler = async (e) => {
     const u = await current(e); if(!u) return json({error:'Unauthorized'},401);
     if(e.httpMethod==='OPTIONS') return json({ok:true});
     let r:any = null;
-    r = await dashboard(p,e) || await patients(p,e,u) || await archive(p,e,u) || await roomsBeds(p,e,u) || await tasks(p,e,u) || await treatment(p,e,u) || await appointments(p,e,u) || await documents(p,e,u) || await prescriptions(p,e,u) || await users(p,e,u) || await auditEndpoint(p,e,u);
+    r = await health(p,e,u) || await dashboard(p,e) || await patients(p,e,u) || await archive(p,e,u) || await roomsBeds(p,e,u) || await tasks(p,e,u) || await treatment(p,e,u) || await appointments(p,e,u) || await documents(p,e,u) || await prescriptions(p,e,u) || await users(p,e,u) || await auditEndpoint(p,e,u);
     if(r) return r;
     return json({error:'Not found'},404);
   } catch(ex:any) { return json({error:ex?.message||'API error'},Number(ex?.status)||500); }
