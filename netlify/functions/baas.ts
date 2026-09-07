@@ -13,14 +13,6 @@ export const handler: Handler = async (event, context) => {
   if(method==='OPTIONS') return json({ok:true});
   try {
     await ensureRbac();
-    if(normalizedPath==='/health'&&method==='GET'){
-      const user=await current(bearer(event));
-      if(!user) return json({error:'Unauthorized'},401);
-      if(!allowed(user,'dashboard.view')) return json({error:'Forbidden',permission:'dashboard.view'},403);
-      const result=await apiHandler({ ...event, path:'/health', httpMethod:'GET' as any, rawUrl:event.rawUrl?.replace(/\\/api\\/baas(?=\\/|$)/,'') }, context);
-      if(result.headers) result.headers['X-RehaFlow-Data-Source']='Turso';
-      return result;
-    }
     const required=permissionForPath(normalizedPath,method);
     if(required){
       const user=await current(bearer(event));
@@ -29,9 +21,17 @@ export const handler: Handler = async (event, context) => {
     }
     if(normalizedPath==='/roles'&&method==='GET') return json({roles:await listRoles()});
     let routePath=normalizedPath;
+    let routeMethod=method;
     if(routePath.startsWith('/auth/')) routePath=routePath.slice(5);
     if(routePath==='/staff/doctors') routePath='/doctors';
-    if(routePath.match(/^\/patients\/[^/]+\/archive$/)&&method==='POST'){routePath=routePath.replace(/\/archive$/,'');}
-    return apiHandler({ ...event, path: routePath, httpMethod: routePath!==normalizedPath && normalizedPath.match(/^\/patients\/[^/]+\/archive$/) ? 'DELETE' as any : method as any, rawUrl: event.rawUrl?.replace(/\\/api\\/baas(?=\\/|$)/,'') }, context);
+    if(routePath.match(/^\/patients\/[^/]+\/archive$/)&&routeMethod==='POST'){
+      routePath=routePath.replace(/\/archive$/,'');
+      routeMethod='DELETE';
+    }
+    if(routePath.match(/^\/beds\/[^/]+$/)&&routeMethod==='PATCH'){
+      routePath += '/assign';
+      routeMethod='POST';
+    }
+    return apiHandler({ ...event, path: routePath, httpMethod: routeMethod as any, rawUrl: event.rawUrl?.replace(/\\/api\\/baas(?=\\/|$)/,'') }, context);
   } catch (e:any) { return json({error:e?.message||'Gateway error'},500); }
 };
